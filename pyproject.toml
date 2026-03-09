@@ -1,0 +1,15 @@
+[project]
+name = "ghc2f"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "pandas-stubs~=2.3.3",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.15.3",
+    "scipy-stubs~=1.15.3",
+    "torch>=2.10.0",
+    "tqdm>=4.67.3",
+]
