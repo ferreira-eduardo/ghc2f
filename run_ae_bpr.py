@@ -2,6 +2,7 @@ import argparse
 import gc
 import ast
 import os.path
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -34,27 +35,30 @@ def loocv_collate_fn(batch, user_history_dict, total_items, num_negatives=99):
 
     topics_list = [d["user_topics"].clone().detach() for d in batch]
     res["user_topics"] = torch.nn.utils.rnn.pad_sequence(topics_list, batch_first=True)
+
     lengths = torch.tensor([t.size(0) for t in topics_list])
     max_len = res["user_topics"].size(1)
     res["user_mask"] = torch.arange(max_len).expand(len(lengths), max_len) < lengths.unsqueeze(1)
 
     test_items = []
-    neg_items = []
-    all_item_ids = np.arange(total_items)
+    neg_items_batch = []
 
     for d in batch:
         u_id = d["user_ids"]
         test_items.append(d["pos_item_id"])
 
         interacted = user_history_dict.get(u_id, set())
-        candidates = np.setdiff1d(all_item_ids, list(interacted), assume_unique=True)
+        negs = []
+        while len(negs) < num_negatives:
+            sample = np.random.randint(0, total_items, size=num_negatives - len(negs))
+            for s in sample:
+                if s not in interacted:
+                    negs.append(s)
 
-        negs = np.random.choice(candidates, num_negatives,
-                                replace=len(candidates) < num_negatives)
-        neg_items.append(torch.tensor(negs, dtype=torch.long))
+        neg_items_batch.append(torch.tensor(negs, dtype=torch.long))
 
     res["pos_item_id"] = torch.tensor(test_items, dtype=torch.long)
-    res["neg_item_id"] = torch.stack(neg_items)
+    res["neg_item_id"] = torch.stack(neg_items_batch)
     return res
 
 
@@ -84,7 +88,7 @@ def main():
     for fold in k_folds:
         print(f"\n########## FOLD {fold} ##########")
         train, val, test = get_loocv_fold_normalized(df, fold)
-
+        test_relevant = test[test["is_relevant"] == True].copy()
         model = GHC2F(
             layer_sizes=[total_items] + args.layers,
             num_users=total_users,
@@ -137,20 +141,28 @@ def main():
         del train
         gc.collect()
 
-        # Dataloader de Validação (Contrastive)
+        val_collate = partial(
+            loocv_collate_fn,
+            user_history_dict=full_user_history,
+            total_items=total_items
+        )
+
         val_loader = DataLoader(
             RankingTrainDataset(train_matrix, df_topics, val, df),
-            batch_size=args.batch_size, shuffle=False,
-            collate_fn=lambda x: loocv_collate_fn(x, full_user_history, total_items),
-            num_workers=4
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=val_collate,
+            num_workers=2,  # Reduzir para 2 diminui a pressão na RAM em datasets gigantes
+            persistent_workers=True  # Mantém os workers vivos entre épocas (evita o lag de reinício)
         )
-        test_relevant = test[test["is_relevant"] == True].copy()
 
         test_loader_ranking = DataLoader(
             RankingTrainDataset(history_input_matrix, df_topics, test_relevant, df),
-            batch_size=args.batch_size, shuffle=False,
-            collate_fn=lambda x: loocv_collate_fn(x, full_user_history, total_items),
-            num_workers=4
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=val_collate,
+            num_workers=2,
+            persistent_workers=True
         )
 
         print('Starting training process (BPR Loss)...')

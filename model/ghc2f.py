@@ -159,16 +159,13 @@ class GHC2F(CFAutoEncoder):
 
         with torch.no_grad():
             for batch in loader:
-                # Get scores for all items and the target item index
                 all_scores, target_items = self.predict_step(batch)
 
-                # Find the rank of the target item among all scores
                 _, top_indices = torch.topk(all_scores, k=top_k, dim=1)
 
                 top_indices = top_indices.cpu().numpy()
                 target_items = target_items.cpu().numpy()
 
-                # Check if the target item is in the top K
                 for i in range(len(target_items)):
                     target = target_items[i]
                     indices = top_indices[i]
