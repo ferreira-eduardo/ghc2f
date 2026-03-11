@@ -225,53 +225,6 @@ def _build_one_profile(
     return topics, mask, entity_indices
 
 
-def evaluate_loocv(model, test_loader, device, k=10):
-    """
-    Calculates HR@K, NDCG@K, and MRR for LOOCV.
-    Assumes test_loader batch contains 'test_item_ids' (the positive)
-    and 'negative_item_ids' (the 99 negatives).
-    """
-    model.eval()
-    hr, ndcg, mrr = [], [], []
-
-    with torch.no_grad():
-        for batch in test_loader:
-            y_hat = model(batch)
-
-            # Extract ground truth and negative IDs from batch
-            # positive_items: [batch_size], negative_items: [batch_size, 99]
-            positive_items = batch["pos_item_id"].to(device)
-            negative_items = batch["negative_item_id"].to(device)
-
-            for i in range(y_hat.size(0)):
-                # 1. Gather scores for the 1 positive and 99 negatives
-                target_idx = positive_items[i].item()
-                neg_indices = negative_items[i].tolist()
-
-                item_indices = [target_idx] + neg_indices
-                scores = y_hat[i, item_indices]
-
-                # 2. Rank items (descending)
-                # We want the rank of index 0 (the positive item)
-                _, top_indices = torch.topk(scores, k=len(item_indices))
-                rank = (top_indices == 0).nonzero(as_tuple=True)[0].item() + 1
-
-                # 3. Calculate Metrics
-                # Hit Ratio @ K
-                hr.append(1 if rank <= k else 0)
-
-                # NDCG @ K
-                if rank <= k:
-                    ndcg.append(1 / np.log2(rank + 1))
-                else:
-                    ndcg.append(0)
-
-                # MRR (Mean Reciprocal Rank)
-                mrr.append(1 / rank)
-
-    return {'hit_rate': float(np.mean(hr)), 'ndcg': float(np.mean(ndcg)), 'mrr': float(np.mean(mrr))}
-
-
 class EarlyStoppingRanking:
     def __init__(self, patience=5, delta=0, verbose=True):
         self.patience = patience
@@ -287,7 +240,7 @@ class EarlyStoppingRanking:
 
         if self.best_score is None:
             self.best_score = score
-            # self.save_checkpoint(model, path)
+            self.save_checkpoint(model, path)
         elif score < self.best_score + self.delta:
             self.counter += 1
             if self.verbose:
@@ -296,7 +249,7 @@ class EarlyStoppingRanking:
                 self.early_stop = True
         else:
             self.best_score = score
-            # self.save_checkpoint(model, path)
+            self.save_checkpoint(model, path)
             self.counter = 0
 
     def save_checkpoint(self, model, path):

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from utils.ae_utils import EarlyStoppingRanking, evaluate_loocv
+from utils.ae_utils import EarlyStoppingRanking
 
 def train_model(
         model,
@@ -49,7 +49,7 @@ def train_model(
         train_losses.append(avg_train_loss)
 
         # --- VALIDATION ---
-        val_metrics = evaluate_loocv(model, val_loader, device)
+        val_metrics = model.evaluate(val_loader)
         # val_rmse = val_metrics['rmse']
         # val_mae = val_metrics['mae']
         hit_rate = float(val_metrics['hit_rate'])
@@ -69,32 +69,3 @@ def train_model(
     return best_val_metric, train_losses
 
 
-# change for the evaluate model inside of the model
-def evaluate_model(model, loader):
-    """
-    Generic evaluation. Relies on 'model.predict_step(batch)'
-    """
-    model.eval()
-    total_mse = 0.0
-    total_mae = 0.0
-    num_samples = 0
-
-    with torch.no_grad():
-        for batch in loader:
-            y, y_hat = model.predict_step(batch)
-
-            # Calculate metrics on the CPU to save GPU memory during eval
-            y = y.cpu()
-            y_hat = y_hat.cpu()
-
-            squared_error = (y - y_hat) ** 2
-            abs_error = (y - y_hat).abs()
-
-            total_mse += squared_error.sum().item()
-            total_mae += abs_error.sum().item()
-            num_samples += y.size(0)
-
-    rmse = np.sqrt(total_mse / num_samples) if num_samples > 0 else 0.0
-    mae = total_mae / num_samples if num_samples > 0 else 0.0
-
-    return {'rmse': rmse, 'mae': mae}
