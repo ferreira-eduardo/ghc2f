@@ -4,17 +4,17 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from model.ghc2f import GHC2F
+from model.gated_ae import GatedHybridCFAutoEncoder
 from utils.ae_utils import prepare_inputs
-from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix, \
-    create_gpu_sparse_matrix
+from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix
 from utils.leave_one_out_cv import get_loocv_fold_normalized
-from utils.train_models import train_model
+from utils.train_model import train_model
 
-path = 'datasets/{}.csv'
+path = 'dataset/{}.csv'
 CHECKPOINT = 'checkpoint/{}.pt'
 all_results = []
 all_losses = []
-k_folds = [0, 1, 2, 3, 4]
+k_folds = [4]
 
 
 def main():
@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--embedding_dim", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--model_name", type=str, default='')
     args = parser.parse_args()
 
     print(f"\nLoading datasets: {args.dataset}\n")
@@ -46,13 +47,13 @@ def main():
     topics_dim = len(topic_cols)
 
     for fold in k_folds:
-        print("#" * 20)
+        print("#" * 50)
         print(f"DATASET: {args.dataset}  - FOLD: {fold}")
-        print("#" * 20)
+        print("#" * 50)
 
         train, val, test = get_loocv_fold_normalized(df, fold)
 
-        model = GHC2F(
+        model = GatedHybridCFAutoEncoder(
             layer_sizes=[TOTAL_ITEMS, 4096],
             num_users=TOTAL_USERS,
             num_items=TOTAL_ITEMS,
@@ -60,7 +61,8 @@ def main():
             topics_latent_dim=args.embedding_dim,
             nl_type="selu",
             dp_drop_prob=args.dropout,
-            learn_rate=args.lr
+            learn_rate=args.lr,
+            use_hybrid=False
         ).to(device)
 
         df_topics_train = df_topics[df_topics["itemId"].isin(train["itemId"].unique())].copy()
@@ -73,30 +75,32 @@ def main():
         full_i_global[item_ids] = profiles
         model.item_global_profiles = full_i_global
 
-        train_matrix = create_gpu_sparse_matrix(train, TOTAL_USERS, TOTAL_ITEMS, device)
-        history_matrix = train_matrix
+        train_matrix = create_sparse_matrix(train, TOTAL_USERS, TOTAL_ITEMS)
 
         train_loader = DataLoader(
-            RankingTrainDataset(train_matrix, df_topics, train, df, is_train=True),
-            batch_size=args.batch_size, shuffle=True, collate_fn=train_collate_fn,
+            RankingTrainDataset(train_matrix, df_topics, train),
+            batch_size=args.batch_size, shuffle=True, collate_fn=train_collate_fn, num_workers=4
         )
 
         val_loader = DataLoader(
-            RankingTrainDataset(train_matrix, df_topics, val, df),
-            batch_size=args.batch_size, shuffle=False, collate_fn=lambda x: loocv_collate_fn(x, train)
+            RankingTrainDataset(train_matrix, df_topics, val),
+            batch_size=512, shuffle=False, collate_fn=lambda x: loocv_collate_fn(x, train), num_workers=4
         )
+
         test_relevant = test[test["is_relevant"] == True].copy()
 
         history_for_test = pd.concat([train, val])
         test_loader_ranking = DataLoader(
-            RankingTrainDataset(history_matrix, df_topics, test_relevant, df),
+            RankingTrainDataset(train_matrix, df_topics, test_relevant),
             batch_size=args.batch_size, shuffle=False,
-            collate_fn=lambda x: loocv_collate_fn(x, history_for_test),  # 1 pos + 99 negs
+            collate_fn=lambda x: loocv_collate_fn(x, history_for_test),
+            num_workers=4
         )
 
         ########## trainning ##########
         print('Starting training process (BPR Loss)...')
         best_val_loss, train_losses = train_model(model, args.epochs, train_loader, val_loader)
+
         all_losses.append({
             "datasets": args.dataset, "fold": fold,
             "best_val_losses": best_val_loss, "train_losses": train_losses
@@ -113,16 +117,16 @@ def main():
         gc.collect()
 
         df_results = pd.DataFrame(all_results)
-        df_results.to_csv(f"contrastive_bpr_{args.dataset}.csv", index=False)
+        df_results.to_csv(f"{args.model_name}_bpr_{args.dataset}_complement.csv", index=False)
 
         df_losses = pd.DataFrame(all_losses)
-        df_losses.to_csv(f"contrastive_bpr_losses_{args.dataset}.csv", index=False)
+        df_losses.to_csv(f"{args.model_name}_bpr_losses_{args.dataset}_complement.csv", index=False)
 
     df_results = pd.DataFrame(all_results)
-    df_results.to_csv(f"contrastive_bpr_{args.dataset}.csv", index=False)
+    df_results.to_csv(f"{args.model_name}_bpr_{args.dataset}_complement.csv", index=False)
 
     df_losses = pd.DataFrame(all_losses)
-    df_losses.to_csv(f"contrastive_bpr_losses_{args.dataset}.csv", index=False)
+    df_losses.to_csv(f"{args.model_name}_bpr_losses_{args.dataset}_complement.csv", index=False)
 
 
 if __name__ == "__main__":

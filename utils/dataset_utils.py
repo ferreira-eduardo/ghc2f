@@ -4,47 +4,41 @@ from scipy.sparse import csr_matrix
 from torch.utils.data import Dataset
 
 class RankingTrainDataset(Dataset):
-    def __init__(self, user_item_matrix, df_topics, target_df, df_full_for_negs, is_train=False):
+    def __init__(self, user_item_matrix, df_topics, df_full):
         self.matrix = user_item_matrix
+        self.num_users = user_item_matrix.shape[0]
         self.num_items = user_item_matrix.shape[1]
-        self.is_train = is_train
-        self.samples = target_df[['userId', 'itemId']].values.tolist()
+        self.all_items = np.arange(self.num_items)
 
-        topic_cols = [col for col in df_topics.columns if col.isdigit()]
-        self.user_topics_tensor = torch.zeros((user_item_matrix.shape[0], len(topic_cols)))
-        for u_id, group in df_topics.groupby('userId'):
-            if u_id < self.user_topics_tensor.size(0):
-                self.user_topics_tensor[int(u_id)] = torch.tensor(group[topic_cols].values[0], dtype=torch.float32)
+        self.user_interactions = df_full.groupby('userId')['itemId'].apply(set).to_dict()
 
-        full_interactions = df_full_for_negs.groupby('userId')['itemId'].apply(set).to_dict()
-        all_item_indices = np.arange(self.num_items)
-
-        self.neg_candidates = {}
-        for u_id in range(user_item_matrix.shape[0]):
-            interacted = full_interactions.get(u_id, set())
-            self.neg_candidates[u_id] = list(np.setdiff1d(all_item_indices, list(interacted)))
+        self.user_topics_map = df_topics.groupby('userId')
+        self.topic_cols = [col for col in df_topics.columns if col.isdigit()]
 
     def __len__(self):
-        return len(self.samples)
+        return self.num_users
 
     def __getitem__(self, idx):
-        u_id, pos_item = self.samples[idx]
-        u_id, pos_item = int(u_id), int(pos_item)
+        pos_items = list(self.user_interactions.get(idx, []))
+        pos_item = np.random.choice(pos_items) if pos_items else 0
 
-        res = {
-            "user_ids": u_id,
+        neg_item = np.random.choice(self.all_items)
+        while neg_item in self.user_interactions.get(idx, set()):
+            neg_item = np.random.choice(self.all_items)
+
+        try:
+            u_data = self.user_topics_map.get_group(idx)
+            user_topics = torch.tensor(u_data[self.topic_cols].values, dtype=torch.float32)
+        except KeyError:
+            user_topics = torch.zeros((1, len(self.topic_cols)), dtype=torch.float32)
+
+        return {
+            "user_ids": idx,
             "pos_item_id": pos_item,
-            "ratings_in": torch.from_numpy(self.matrix[u_id].toarray()).float().squeeze(),
-            "user_topics": self.user_topics_tensor[u_id],
-            "neg_candidates": self.neg_candidates.get(u_id, [])  # Pass candidates to collate
+            "neg_item_id": neg_item,
+            "ratings_in": torch.from_numpy(self.matrix[idx].toarray()).float().squeeze(),
+            "user_topics": user_topics
         }
-
-        if self.is_train:
-            neg_item = np.random.choice(self.neg_candidates[u_id])
-            res["neg_item_id"] = neg_item
-
-        return res
-
 
 
 def train_collate_fn(batch):
@@ -116,9 +110,16 @@ def create_sparse_matrix(df, num_users, num_items):
 
 def create_gpu_sparse_matrix(df, total_users, total_items, device):
     indices = torch.stack([
-        torch.from_numpy(df['userId'].values).long(),
-        torch.from_numpy(df['itemId'].values).long()
+        torch.from_numpy(df['userId'].values.copy()).long(),
+        torch.from_numpy(df['itemId'].values.copy()).long()
     ])
     values = torch.from_numpy(df['rating'].values).float()
 
     return torch.sparse_coo_tensor(indices, values, (total_users, total_items)).to(device)
+
+class LOOCVCollateWrapper:
+    def __init__(self, val_df):
+        self.val_df = val_df
+
+    def __call__(self, batch):
+        return loocv_collate_fn(batch, self.val_df)
