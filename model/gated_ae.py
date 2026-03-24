@@ -44,7 +44,7 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         # Item profiler (Global view - reviews independent of the current user)
         self.item_profiler = TopicProfile(num_items, topics_dim, topics_latent_dim)
 
-        # Projection layers to align topic space (15) with CF space (code_dim)
+        # Projection layers to align topic space with CF space (code_dim)
         self.user_proj = nn.Linear(topics_dim, self.code_dim_cf)
         self.item_proj = nn.Linear(topics_dim, self.code_dim_cf)
 
