@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.nn.init as weight_init
 
-from utils.ae_utils import MSEloss
+from utils.utils import MSEloss
 
 _ACTIVATIONS = {
     "selu": F.selu,

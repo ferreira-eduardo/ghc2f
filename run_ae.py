@@ -3,9 +3,12 @@ import gc
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+#models ####
 from model.ghc2f import GHC2F
 from model.gated_ae import GatedHybridCFAutoEncoder
-from utils.ae_utils import prepare_inputs
+from model.aspectgh2f import AspectGHC2F
+############
+from utils.utils import prepare_inputs, AspectDataset
 from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix
 from utils.leave_one_out_cv import get_loocv_fold_normalized
 from utils.train_model import train_model
@@ -53,7 +56,7 @@ def main():
 
         train, val, test = get_loocv_fold_normalized(df, fold)
 
-        model = GatedHybridCFAutoEncoder(
+        model = AspectGHC2F(
             layer_sizes=[TOTAL_ITEMS, 4096],
             num_users=TOTAL_USERS,
             num_items=TOTAL_ITEMS,

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from utils.ae_utils import EarlyStoppingRanking
+from utils.utils import EarlyStoppingRanking
 
 def train_model(
         model,

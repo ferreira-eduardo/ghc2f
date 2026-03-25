@@ -4,7 +4,7 @@ import torch
 import gc
 from torch.utils.data import DataLoader
 
-from utils.ae_utils import prepare_inputs
+from utils.utils import prepare_inputs
 from utils.dataset_utils import RankingTrainDataset, train_collate_fn, create_sparse_matrix
 from utils.dataset_utils import loocv_collate_fn
 from model.ghc2f import GHC2F

@@ -6,124 +6,6 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 
-def _resolve_topic_cols(df: pd.DataFrame, topic_dim: int):
-    str_cols = [str(i) for i in range(topic_dim)]
-    if str_cols[0] in df.columns:
-        return str_cols
-    int_cols = list(range(topic_dim))
-    if int_cols[0] in df.columns:
-        return int_cols
-    raise ValueError(
-        f"Não encontrei colunas de tópicos como strings {str_cols[:3]}... "
-        f"nem como ints {int_cols[:3]}... no df_topics."
-    )
-
-def build_user_item_topic_profiles(
-    df_topics: pd.DataFrame,
-    topic_dim: int,
-    global_id_map: Dict[str, Dict[Any, int]],
-    max_len: int = 50,
-):
-    """
-    Espera que df_topics tenha pelo menos: userId, itemId, e colunas de tópicos.
-
-    global_id_map pode ser:
-      - {"user": {orig: idx}, "item": {orig: idx}}
-        ou
-      - {"user_map": {...}, "item_map": {...}}
-    """
-    # resolve maps
-    user_map = global_id_map.get("user") or global_id_map.get("user_map")
-    item_map = global_id_map.get("item") or global_id_map.get("item_map")
-    if user_map is None or item_map is None:
-        raise ValueError(
-            "global_id_map deve conter {'user':..., 'item':...} "
-            "ou {'user_map':..., 'item_map':...}."
-        )
-
-    topic_cols = _resolve_topic_cols(df_topics, topic_dim)
-
-    user_topics, user_mask, user_idx = _build_one_profile(
-        df_topics=df_topics,
-        id_col="userId",
-        topic_cols=topic_cols,
-        topic_dim=topic_dim,
-        id_map=user_map,
-        max_len=max_len,
-    )
-
-    item_topics, item_mask, item_idx = _build_one_profile(
-        df_topics=df_topics,
-        id_col="itemId",
-        topic_cols=topic_cols,
-        topic_dim=topic_dim,
-        id_map=item_map,
-        max_len=max_len,
-    )
-
-    return {
-        "user": (user_topics, user_idx, user_mask),
-        "item": (item_topics, item_idx, item_mask),
-    }
-
-
-class AEDataset(Dataset):
-    def __init__(self, rating_matrix: torch.Tensor, rating_y):
-        # rating_matrix: [num_users, num_items]
-        self.X = rating_matrix
-        self.Y = rating_y
-
-    def __len__(self):
-        return self.X.size(0)
-
-    def __getitem__(self, idx):
-        return self.X[idx]
-
-
-def build_train_history(train_df_idx):
-    history = {}
-    grouped = train_df_idx.groupby('userId')
-    for u_idx, group in grouped:
-        items = group['itemId'].unique().tolist()
-        history[u_idx] = set(items)
-    return history
-
-
-class HybridDataset(Dataset):
-    def __init__(self, ratings_in, ratings_tgt, user_ids,
-                 user_topics, user_mask):
-        self.ratings_in = ratings_in
-        self.ratings_tgt = ratings_tgt
-        self.user_ids = user_ids
-        self.user_topics = user_topics
-        self.user_mask = user_mask
-
-    def __len__(self):
-        return self.ratings_in.shape[0]
-
-    def __getitem__(self, u):
-        return {
-            "ratings_in": self.ratings_in[u],
-            "ratings_tgt": self.ratings_tgt[u],
-            "user_ids": self.user_ids[u],
-            "user_topics": self.user_topics[u],
-            "user_mask": self.user_mask[u],
-        }
-
-
-def build_global_id_maps(df_ratings: pd.DataFrame):
-    user_ids = df_ratings["userId"].unique()
-    item_ids = df_ratings["itemId"].unique()
-
-    user_map = {uid: idx for idx, uid in enumerate(user_ids)}
-    item_map = {iid: idx for idx, iid in enumerate(item_ids)}
-
-    return {
-        "user": user_map,
-        "item": item_map
-    }
-
-
 def MSEloss(
         inputs: torch.Tensor,
         targets: torch.Tensor,
@@ -256,3 +138,50 @@ class EarlyStoppingRanking:
         if self.verbose:
             print(f'Metric improved. Saving model to {path}...')
         torch.save(model.state_dict(), path)
+
+
+
+
+class AspectDataset(Dataset):
+    def __init__(self, user_item_matrix, df_full, all_review_embeddings):
+        self.matrix = user_item_matrix
+        self.review_embeddings = torch.tensor(all_review_embeddings, dtype=torch.float32)
+
+        # Agrupamos os índices das reviews por usuário
+        self.user_reviews_idx = df_full.groupby('userId').apply(lambda x: x.index.tolist()).to_dict()
+
+        # Mapeamento (User, Item) -> Index da review específica
+        self.interaction_to_idx = {(r.userId, r.itemId): i for i, r in enumerate(df_full.itertuples())}
+
+        self.user_interactions = df_full.groupby('userId')['itemId'].apply(list).to_dict()
+        self.item_repr = df_full.groupby('itemId').apply(lambda x: x.index.tolist()).to_dict()
+
+    def __getitem__(self, u_idx):
+        # 1. Recuperar Histórico de Texto do Usuário
+        # Todas as reviews que este usuário já fez
+        h_indices = self.user_reviews_idx.get(u_idx, [0])
+        user_history_emb = self.review_embeddings[h_indices].mean(dim=0, keepdim=True)  # [1, 768]
+
+        # 2. Item Positivo e sua Review específica
+        pos_items = self.user_interactions.get(u_idx, [0])
+        pos_item = np.random.choice(pos_items)
+        pos_rev_idx = self.interaction_to_idx[(u_idx, pos_item)]
+        pos_text = self.review_embeddings[pos_rev_idx].unsqueeze(0)
+
+        # 3. Item Negativo e uma Review "exemplo" dele
+        neg_item = np.random.choice(np.arange(self.matrix.shape[1]))
+        while neg_item in self.user_interactions.get(u_idx, []):
+            neg_item = np.random.choice(np.arange(self.matrix.shape[1]))
+
+        neg_rev_indices = self.item_repr.get(neg_item, [0])
+        neg_text = self.review_embeddings[np.random.choice(neg_rev_indices)].unsqueeze(0)
+
+        return {
+            "user_ids": u_idx,
+            "pos_item_id": pos_item,
+            "neg_item_id": neg_item,
+            "ratings_in": torch.from_numpy(self.matrix[u_idx].toarray()).float().squeeze(),
+            "user_history_text": user_history_emb,
+            "pos_text_seq": pos_text,
+            "neg_text_seq": neg_text
+        }

@@ -1,34 +1,24 @@
 import torch
 from model.ghc2f import GHC2F
 from cross_attention import AspectCrossAttention
+import torch.nn.functional as F
 
 class AspectGHC2F(GHC2F):
     def __init__(self, *ae_args, **ae_kwargs):
         super().__init__(*ae_args, **ae_kwargs)
 
-        # Adiciona o componente de atenção
-        # d_text deve ser a dimensão do seu modelo de linguagem
         self.aspect_attention = AspectCrossAttention(
             d_cf=self.bottleneck_dim,
             d_text=ae_kwargs.get('d_text', 768)
         )
 
     def forward(self, batch, return_code=False):
-        # 1. Fluxo original do Autoencoder (Sinal Colaborativo + Tópicos)
-        # Assume-se que seu GatedHybridCFAutoEncoder já gera z_cf e z_fused
-        # Para este exemplo, simplificamos para focar na integração da atenção
         z_ae = self.encode(batch["ratings_in"])
-
-        # 2. Processamento de Atenção (Sinal Semântico de Aspectos)
-        # Aqui usamos o texto associado ao perfil do usuário/item no batch
         z_semantic, _ = self.aspect_attention(batch["text_seq"], batch.get("text_mask"))
 
-        # 3. Fusão Final: O sinal de aspectos refina o sinal do Autoencoder
-        # Usamos uma combinação residual ou o gate original do seu modelo
         z_final = self.gate_fusion(z_ae, z_semantic)
 
         if return_code:
-            # Retornamos z_semantic separadamente para a Contrastive Loss
             return None, z_final, None, z_ae, z_semantic
         return z_final
 
