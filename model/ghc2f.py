@@ -1,6 +1,3 @@
-import math
-
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -22,13 +19,12 @@ class GHC2F(GatedHybridCFAutoEncoder):
         else:
             self.item_aligner = nn.Identity()
 
-
     def get_item_embeddings(self):
         raw_weights = self.encoder[0].weight.t()
         return self.item_aligner(raw_weights)
 
     def forward_bpr(self, batch):
-        _, z_fused, _ = self.forward(batch, return_code=True)
+        z_fused, _, _, _ = self.forward(batch)
 
         raw_item_embeddings = self.get_item_embeddings()
 
@@ -44,16 +40,18 @@ class GHC2F(GatedHybridCFAutoEncoder):
         return pos_scores, neg_scores
 
     def calculate_loss(self, batch, reg_weight=1e-5, cl_weight=0.1):
-        logits, pos_scores, neg_scores, z_cf, z_fused = self.forward(batch, return_code=True)
+
+        _, z_fused, z_cf, pos_scores, neg_scores = self.forward(batch)
 
         loss_bpr = F.softplus(neg_scores - pos_scores).mean()
 
-        loss_cl = self.contrastive_loss(z_cf, z_fused)
+        loss_cl = self.contrastive_loss(z_fused, z_cf)
 
         item_embeddings = self.get_item_embeddings()
-        reg_loss = (torch.norm(item_embeddings[batch["pos_item_id"]])**2 +
-                    torch.norm(item_embeddings[batch["neg_item_id"]])**2 +
-                    torch.norm(batch["ratings_in"])**2)
+
+        reg_loss = (torch.norm(item_embeddings[batch["pos_item_id"]]) ** 2 +
+                    torch.norm(item_embeddings[batch["neg_item_id"]]) ** 2 +
+                    torch.norm(batch["ratings_in"]) ** 2)
 
         total_loss = loss_bpr + (cl_weight * loss_cl) + (reg_weight * reg_loss)
 
@@ -100,5 +98,3 @@ class GHC2F(GatedHybridCFAutoEncoder):
         all_scores[ratings_in > 0] = -1e9
 
         return all_scores
-
-

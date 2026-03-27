@@ -1,6 +1,6 @@
 import torch
 from model.ghc2f import GHC2F
-from cross_attention import AspectCrossAttention
+from model.cross_attention import AspectCrossAttention
 import torch.nn.functional as F
 
 class AspectGHC2F(GHC2F):

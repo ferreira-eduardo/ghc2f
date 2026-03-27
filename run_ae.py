@@ -13,7 +13,7 @@ from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_col
 from utils.leave_one_out_cv import get_loocv_fold_normalized
 from utils.train_model import train_model
 
-path = 'dataset/{}.csv'
+path = 'datasets/{}.csv'
 CHECKPOINT = 'checkpoint/{}.pt'
 all_results = []
 all_losses = []
@@ -56,7 +56,7 @@ def main():
 
         train, val, test = get_loocv_fold_normalized(df, fold)
 
-        model = AspectGHC2F(
+        model = GHC2F(
             layer_sizes=[TOTAL_ITEMS, 4096],
             num_users=TOTAL_USERS,
             num_items=TOTAL_ITEMS,
@@ -65,7 +65,6 @@ def main():
             nl_type="selu",
             dp_drop_prob=args.dropout,
             learn_rate=args.lr,
-            use_hybrid=False
         ).to(device)
 
         df_topics_train = df_topics[df_topics["itemId"].isin(train["itemId"].unique())].copy()
@@ -87,7 +86,7 @@ def main():
 
         val_loader = DataLoader(
             RankingTrainDataset(train_matrix, df_topics, val),
-            batch_size=512, shuffle=False, collate_fn=lambda x: loocv_collate_fn(x, train), num_workers=4
+            batch_size=args.batch_size, shuffle=False, collate_fn=lambda x: loocv_collate_fn(x, train), num_workers=4
         )
 
         test_relevant = test[test["is_relevant"] == True].copy()

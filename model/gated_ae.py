@@ -9,11 +9,8 @@ import torch.nn.functional as F
 
 class GatedHybridCFAutoEncoder(CFAutoEncoder):
     def __init__(self, layer_sizes, num_users, num_items, topics_dim=15,
-                 topics_latent_dim=64, use_hybrid = True ,**kwargs):
+                 topics_latent_dim=64, **kwargs):
         super().__init__(layer_sizes, **kwargs)
-
-        self.training = True  # bpr loss
-        self.use_hybrid = use_hybrid
 
         ########## add to layer-to-layer
         # encoder hidden dims, including code_dim
@@ -84,54 +81,47 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         h = self.drop(h)
         return h
 
-    def forward(self, batch, return_code=False):
+    def forward(self, batch):
         ratings_in = batch["ratings_in"].to(self.device)
 
-        if not self.use_hybrid:
-            z_cf = self.encode(ratings_in)
-            z_fused = z_cf
-        else:
-            # --- Original Topic Logic ---
-            u_ids = batch["user_ids"].to(self.device)
-            u_topics = batch["user_topics"].to(self.device)
-            u_mask = batch["user_mask"].to(self.device)
+        # collaborative signal
+        z_cf = self.encode(ratings_in)
 
-            z_user_topic = self.user_profiler(u_ids, u_topics, u_mask)
-            topic_user = self.user_proj(z_user_topic)
+        u_ids = batch["user_ids"].to(self.device)
+        u_topics = batch["user_topics"].to(self.device)
+        u_mask = batch["user_mask"].to(self.device)
 
-            item_global = self.item_global_profiles
-            hist_mask = (ratings_in != 0).float()
-            interaction_counts = hist_mask.sum(dim=1, keepdim=True)
-            topic_item_global = (hist_mask @ item_global) / interaction_counts.clamp_min(1.0)
-            topic_item = self.item_proj(topic_item_global)
+        z_user_topic = self.user_profiler(u_ids, u_topics, u_mask)
+        topic_user = self.user_proj(z_user_topic)
 
-            z_topic = 0.5 * (topic_user + topic_item)
-            z_fused = self.encode_with_topics(ratings_in, z_topic)
+        item_global = self.item_global_profiles
+        hist_mask = (ratings_in != 0).float()
+        interaction_counts = hist_mask.sum(dim=1, keepdim=True)
+        topic_item_global = (hist_mask @ item_global) / interaction_counts.clamp_min(1.0)
+        topic_item = self.item_proj(topic_item_global)
+
+        z_topic = 0.5 * (topic_user + topic_item)
+        z_fused = self.encode_with_topics(ratings_in, z_topic)
 
         logits = self.decode(z_fused)
 
-        if self.training:
-            device = logits.device
-            pos_items = batch["pos_item_id"].to(device)
-            neg_items = batch["neg_item_id"].to(device)
+        pos_items = batch["pos_item_id"].to(self.device)
+        neg_items = batch["neg_item_id"].to(self.device)
 
-            pos_scores = torch.gather(logits, 1, pos_items.unsqueeze(-1))
-            neg_scores = torch.gather(logits, 1, neg_items.unsqueeze(-1))
+        if pos_items.dim() < logits.dim():
+            pos_items = pos_items.unsqueeze(-1)
+        if neg_items.dim() < logits.dim():
+            neg_items = neg_items.unsqueeze(-1)
 
-            return logits, pos_scores, neg_scores
+        pos_scores = torch.gather(logits, 1, pos_items)
+        neg_scores = torch.gather(logits, 1, neg_items)
 
-        return (logits, z_fused, None) if return_code else logits
-
+        return logits, z_fused, z_cf, pos_scores, neg_scores
 
     def calculate_loss(self, batch):
-        logits, pos_scores, neg_scores = self.forward(batch)
+        _, _, _, pos_scores, neg_scores = self.forward(batch)
 
         user_ids = batch["user_ids"].to(self.device)
-        pos_item_ids = batch["pos_item_id"].to(self.device)
-        neg_item_ids = batch["neg_item_id"].to(self.device)
-
-        pos_scores = torch.gather(logits, 1, pos_item_ids.unsqueeze(-1))
-        neg_scores = torch.gather(logits, 1, neg_item_ids.unsqueeze(-1))
 
         loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-10).mean()
 
@@ -155,43 +145,37 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
 
         return y_true_flat, y_pred_flat
 
-
     def evaluate(self, test_loader, k=10):
-        """
-        Calculates HR@K, NDCG@K, and MRR for LOOCV.
-        Assumes test_loader batch contains 'test_item_ids' (the positive)
-        and 'negative_item_ids' (the 99 negatives).
-        """
         self.eval()
         hr, ndcg, mrr = [], [], []
 
         with torch.no_grad():
             for batch in test_loader:
-                y_hat = self(batch)
+                out = self(batch)
+                logits = out[0] if isinstance(out, (tuple, list)) else out
 
-                positive_items = batch["pos_item_id"].to(self.device)
-                negative_items = batch["neg_item_id"].to(self.device)
+                pos_items = batch["pos_item_id"].to(self.device)
+                neg_items = batch["neg_item_id"].to(self.device)
 
-                for i in range(y_hat.size(0)):
-                    target_idx = positive_items[i].item()
-                    neg_indices = negative_items[i].tolist()
+                target_items = torch.cat([pos_items.unsqueeze(-1), neg_items], dim=1)
 
-                    item_indices = [target_idx] + list(neg_indices)
-                    scores = y_hat[i, item_indices]
+                scores = torch.gather(logits, 1, target_items)  # [Batch, 100]
 
-                    _, top_indices = torch.topk(scores, k=len(item_indices))
-                    rank = (top_indices == 0).nonzero(as_tuple=True)[0].item() + 1
+                _, indices = torch.sort(scores, descending=True, dim=1)
 
-                    # Hit Ratio @ K
+                ranks = (indices == 0).nonzero(as_tuple=True)[1] + 1
+                ranks = ranks.cpu().numpy()
+
+                for rank in ranks:
                     hr.append(1 if rank <= k else 0)
-
-                    # NDCG @ K
                     if rank <= k:
                         ndcg.append(1 / np.log2(rank + 1))
                     else:
                         ndcg.append(0)
-
-                    # MRR (Mean Reciprocal Rank)
                     mrr.append(1 / rank)
 
-        return {'hit_rate': float(np.mean(hr)), 'ndcg': float(np.mean(ndcg)), 'mrr': float(np.mean(mrr))}
+        return {
+            'hit_rate': float(np.mean(hr)),
+            'ndcg': float(np.mean(ndcg)),
+            'mrr': float(np.mean(mrr))
+        }

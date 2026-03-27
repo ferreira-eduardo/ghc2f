@@ -122,7 +122,7 @@ class CFAutoEncoder(nn.Module):
                     out = activation(out, self._nl_type)
             return out
 
-    def forward(self, batch, return_code: bool = False):
+    def forward(self, batch):
         """
         x : torch.Tensor
             Input [B, input_dim].
@@ -138,15 +138,14 @@ class CFAutoEncoder(nn.Module):
         """
         code = self.encode(batch)
         recon = self.decode(code)
-        if return_code:
-            return recon, code
-        return recon
+
+        return recon, code
 
     def calculate_loss(self, batch):
 
         batch = batch.to(self.device)
 
-        preds = self(batch)
+        preds, _ = self(batch)
 
         loss, _ = MSEloss(preds, batch, size_average=True)
 
