@@ -6,9 +6,8 @@ from torch.utils.data import DataLoader
 #models ####
 from model.ghc2f import GHC2F
 from model.gated_ae import GatedHybridCFAutoEncoder
-from model.aspectgh2f import AspectGHC2F
 ############
-from utils.utils import prepare_inputs, AspectDataset
+from utils.utils import prepare_inputs
 from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix
 from utils.leave_one_out_cv import get_loocv_fold_normalized
 from utils.train_model import train_model
