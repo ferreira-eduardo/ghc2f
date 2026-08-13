@@ -4,28 +4,28 @@ import torch.nn.functional as F
 import math
 
 
-class TopicProfile(nn.Module):
-    def __init__(self, num_entities, topics_dim=15, latent_dim=64, dropout=0.2):
+class TextProfile(nn.Module):
+    def __init__(self, num_entities, text_dim=15, latent_dim=64, dropout=0.2):
         super().__init__()
 
-        self.topics_dim = topics_dim
+        self.text_dim = text_dim
         self.latent_dim = latent_dim
 
         self.entity_embedding = nn.Embedding(num_entities, latent_dim)
         self.W_query = nn.Linear(latent_dim, latent_dim)
-        self.W_key = nn.Linear(topics_dim, latent_dim)
+        self.W_key = nn.Linear(text_dim, latent_dim)
 
         self.attn_drop = nn.Dropout(dropout)
         self.out_drop = nn.Dropout(dropout)
-        # LayerNorm now must match topics_dim
-        self.norm = nn.LayerNorm(topics_dim)
+        # LayerNorm now must match text_dim
+        self.norm = nn.LayerNorm(text_dim)
 
-    def forward(self, ids, topics, mask=None):
+    def forward(self, ids, text, mask=None):
         query = self.W_query(self.entity_embedding(ids)).unsqueeze(1)
 
-        if topics.dim() == 2:
-            topics = topics.unsqueeze(1)
-        keys = self.W_key(topics)
+        if text.dim() == 2:
+            text = text.unsqueeze(1)
+        keys = self.W_key(text)
 
         scores = torch.bmm(query, keys.transpose(1, 2)) / math.sqrt(self.latent_dim)
 
@@ -33,7 +33,7 @@ class TopicProfile(nn.Module):
             mask = mask.to(dtype=torch.bool)
             # Ensure mask is (Batch, 1, 1) to match scores
             if mask.dim() == 2:
-                # If mask is per-user rather than per-topic-feature
+                # If mask is per-user rather than per-text-feature
                 mask = mask.any(dim=1, keepdim=True).unsqueeze(2)
 
             scores = scores.masked_fill(~mask, float("-inf"))
@@ -46,7 +46,7 @@ class TopicProfile(nn.Module):
         weights = F.softmax(scores, dim=-1)
         weights = self.attn_drop(weights)
 
-        context = torch.bmm(weights, topics).squeeze(1)
+        context = torch.bmm(weights, text).squeeze(1)
 
         context = self.norm(context)
 

@@ -1,10 +1,16 @@
+from functools import partial
+
 import numpy as np
+import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+
+from utils.utils import AspectDataset
+
 
 class RankingTrainDataset(Dataset):
-    def __init__(self, user_item_matrix, df_topics, df_full):
+    def __init__(self, user_item_matrix, df_text, df_full):
         self.matrix = user_item_matrix
         self.num_users = user_item_matrix.shape[0]
         self.num_items = user_item_matrix.shape[1]
@@ -12,8 +18,8 @@ class RankingTrainDataset(Dataset):
 
         self.user_interactions = df_full.groupby('userId')['itemId'].apply(set).to_dict()
 
-        self.user_topics_map = df_topics.groupby('userId')
-        self.topic_cols = [col for col in df_topics.columns if col.isdigit()]
+        self.user_text_map = df_text.groupby('userId')
+        self.text_cols = [col for col in df_text.columns if str(col).isdigit()]
 
     def __len__(self):
         return self.num_users
@@ -27,17 +33,17 @@ class RankingTrainDataset(Dataset):
             neg_item = np.random.choice(self.all_items)
 
         try:
-            u_data = self.user_topics_map.get_group(idx)
-            user_topics = torch.tensor(u_data[self.topic_cols].values, dtype=torch.float32)
+            u_data = self.user_text_map.get_group(idx)
+            user_text = torch.tensor(u_data[self.text_cols].values, dtype=torch.float32)
         except KeyError:
-            user_topics = torch.zeros((1, len(self.topic_cols)), dtype=torch.float32)
+            user_text = torch.zeros((1, len(self.text_cols)), dtype=torch.float32)
 
         return {
             "user_ids": idx,
             "pos_item_id": pos_item,
             "neg_item_id": neg_item,
             "ratings_in": torch.from_numpy(self.matrix[idx].toarray()).float().squeeze(),
-            "user_topics": user_topics
+            "user_text": user_text
         }
 
 
@@ -49,11 +55,11 @@ def train_collate_fn(batch):
     res["pos_item_id"] = torch.tensor([d["pos_item_id"] for d in batch], dtype=torch.long)
     res["neg_item_id"] = torch.tensor([d["neg_item_id"] for d in batch], dtype=torch.long)
 
-    topics_list = [d["user_topics"] for d in batch]
-    res["user_topics"] = torch.nn.utils.rnn.pad_sequence(topics_list, batch_first=True)
+    topics_list = [d["user_text"] for d in batch]
+    res["user_text"] = torch.nn.utils.rnn.pad_sequence(topics_list, batch_first=True)
 
     lengths = torch.tensor([t.size(0) for t in topics_list])
-    max_len = res["user_topics"].size(1)
+    max_len = res["user_text"].size(1)
     res["user_mask"] = torch.arange(max_len).expand(len(lengths), max_len) < lengths.unsqueeze(1)
 
     return res
@@ -70,11 +76,11 @@ def loocv_collate_fn(batch, df_full, num_negatives=99):
     res["ratings_in"] = torch.stack([d["ratings_in"].clone().detach() for d in batch])
 
     # Handle variable length user topics
-    topics_list = [d["user_topics"].clone().detach() for d in batch]
-    res["user_topics"] = torch.nn.utils.rnn.pad_sequence(topics_list, batch_first=True)
+    topics_list = [d["user_text"].clone().detach() for d in batch]
+    res["user_text"] = torch.nn.utils.rnn.pad_sequence(topics_list, batch_first=True)
 
     lengths = torch.tensor([t.size(0) for t in topics_list])
-    max_len = res["user_topics"].size(1)
+    max_len = res["user_text"].size(1)
     res["user_mask"] = torch.arange(max_len).expand(len(lengths), max_len) < lengths.unsqueeze(1)
 
     test_items = []
@@ -108,18 +114,116 @@ def create_sparse_matrix(df, num_users, num_items):
     )
 
 
-def create_gpu_sparse_matrix(df, total_users, total_items, device):
-    indices = torch.stack([
-        torch.from_numpy(df['userId'].values.copy()).long(),
-        torch.from_numpy(df['itemId'].values.copy()).long()
-    ])
-    values = torch.from_numpy(df['rating'].values).float()
+def loocv_collate_fn_text(batch, text_embeddings, user_reviews_dict):
+    res = {}
 
-    return torch.sparse_coo_tensor(indices, values, (total_users, total_items)).to(device)
+    # 1. IDs básicos (ajustado para bater com seu Dataset 'user_id')
+    user_ids = torch.tensor([d["user_id"] for d in batch])
+    res["user_ids"] = user_ids
+    res["target_items"] = torch.tensor([d["pos_item_id"] for d in batch])
+    res["ratings_in"] = torch.stack([d["ratings_in"] for d in batch])
 
-class LOOCVCollateWrapper:
-    def __init__(self, val_df):
-        self.val_df = val_df
+    # 2. Embedding do Item Alvo (Positivo)
+    # No Dataset, o pos_text_seq já vem pronto para o item alvo da validação
+    res["pos_text_seq"] = torch.stack([d["pos_text_seq"] for d in batch])
 
-    def __call__(self, batch):
-        return loocv_collate_fn(batch, self.val_df)
+    # 3. Gerar Histórico do Usuário (A Query para a Atenção)
+    user_histories = []
+    for u in user_ids.tolist():
+        # Buscamos no dicionário de reviews do TREINO
+        h_idx = user_reviews_dict.get(u, [])
+        if len(h_idx) > 0:
+            u_emb = text_embeddings[h_idx].mean(dim=0, keepdim=True)
+        else:
+            u_emb = torch.zeros((1, text_embeddings.size(1)))
+        user_histories.append(u_emb)
+
+    res["user_history_text"] = torch.stack(user_histories)  # [B, 1, 768]
+
+    return res
+
+
+# for train
+def loocv_collate_fn_text_train(batch, text_embeddings, user_reviews_dict):
+    # IDs e dados básicos
+    user_ids = torch.tensor([d["user_id"] for d in batch])
+    pos_item_ids = torch.tensor([d["pos_item_id"] for d in batch])
+    neg_item_ids = torch.tensor([d["neg_item_id"] for d in batch])
+    ratings_in = torch.stack([d["ratings_in"] for d in batch])
+
+    # Textos (Embeddings)
+    pos_text_seq = torch.stack([d["pos_text_seq"] for d in batch])
+    neg_text_seq = torch.stack([d["neg_text_seq"] for d in batch])
+
+    # Histórico do Usuário
+    user_histories = []
+    for u in user_ids.tolist():
+        h_idx = user_reviews_dict.get(u, [])
+        if len(h_idx) > 0:
+            u_emb = text_embeddings[h_idx].mean(dim=0, keepdim=True)
+        else:
+            u_emb = torch.zeros((1, text_embeddings.size(1)))
+        user_histories.append(u_emb)
+
+    return {
+        "user_ids": user_ids,
+        "pos_item_id": pos_item_ids,
+        "neg_item_id": neg_item_ids,
+        "ratings_in": ratings_in,
+        "pos_text_seq": pos_text_seq,
+        "neg_text_seq": neg_text_seq,
+        "user_history_text": torch.stack(user_histories)
+    }
+
+
+
+
+def generate_data_loaders (train_matrix, train_df, val_df, test_df, text_embedding, batch_size):
+
+    train_reviews_dict = train_df.groupby('userId').groups
+
+    collate_fn_train = partial(
+        loocv_collate_fn_text_train,
+        text_embeddings=torch.from_numpy(text_embedding).float(),
+        user_reviews_dict=train_reviews_dict
+    )
+
+    train_loader = DataLoader(
+        AspectDataset(train_matrix, train_df, text_embedding),
+        batch_size=batch_size, shuffle=True,
+        collate_fn=collate_fn_train, num_workers=4
+    )
+
+    collate_val = partial(
+        loocv_collate_fn_text_train,
+        text_embeddings=torch.from_numpy(text_embedding).float(),
+        user_reviews_dict=train_reviews_dict
+    )
+
+    val_loader = DataLoader(
+        AspectDataset(train_matrix, val_df, text_embedding),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_val,
+        num_workers=4
+    )
+
+    test_relevant = test_df[test_df["is_relevant"] == True].copy()
+    history_df = pd.concat([train_df, val_df])
+    history_reviews_dict = history_df.groupby('userId').groups
+    collate_test = partial(
+        loocv_collate_fn_text_train,
+        text_embeddings=torch.from_numpy(text_embedding).float(),
+        user_reviews_dict=history_reviews_dict
+    )
+
+    test_loader = DataLoader(
+        AspectDataset(train_matrix, test_relevant, text_embedding),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_test,
+        num_workers=4
+    )
+
+
+    return train_loader, val_loader, test_loader

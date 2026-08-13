@@ -5,6 +5,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.nn.init as weight_init
+from dataclasses import dataclass
+
+@dataclass
+class AEOutput:
+    recon: torch.Tensor
+    code: torch.Tensor
+
 
 from utils.utils import MSEloss
 
@@ -41,7 +48,7 @@ class CFAutoEncoder(nn.Module):
     ):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
+        self.name = "AE_BPR"
         self._nl_type = nl_type
         self._dp_drop_prob = dp_drop_prob
         self._last_layer_activations = last_layer_activations
@@ -139,7 +146,7 @@ class CFAutoEncoder(nn.Module):
         code = self.encode(batch)
         recon = self.decode(code)
 
-        return recon, code
+        return AEOutput(recon=recon, code=code)
 
     def calculate_loss(self, batch):
 

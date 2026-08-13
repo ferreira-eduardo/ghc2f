@@ -2,14 +2,12 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from utils.utils import EarlyStoppingRanking
-
 def train_model(
         model,
         num_epochs,
         train_loader,
         val_loader,
-        patience=7,
+        early_stopping,
 ):
     """
     """
@@ -21,7 +19,6 @@ def train_model(
 
     model.to(device)
 
-    early_stopper = EarlyStoppingRanking(patience=patience, verbose=True)
 
 
     for epoch in range(num_epochs):
@@ -31,6 +28,8 @@ def train_model(
         # --- TRAIN LOOP ---
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
         for batch in pbar:
+            batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
             # The Adapter Call: Model handles its own data unpacking and loss
             loss, batch_size = model.calculate_loss(batch)
 
@@ -57,12 +56,12 @@ def train_model(
         print(f" --> Val HIT RATE: {hit_rate}" )
 
         # --- EARLY STOPPING ---
-        early_stopper(hit_rate, model, 'best_bpr_model.pt')
+        early_stopping(hit_rate, model)
 
         if hit_rate > best_val_metric:
             best_val_metric = hit_rate
 
-        if early_stopper.early_stop:
+        if early_stopping.early_stop:
             print("Early stopping triggered")
             break
 
