@@ -16,10 +16,7 @@ def train_model(
     train_losses = []
     best_val_metric = 0
 
-
     model.to(device)
-
-
 
     for epoch in range(num_epochs):
         model.train()

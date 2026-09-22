@@ -17,10 +17,10 @@ mkdir -p outputs/
 echo "Starting GHC2F..."
 
 
-#python3 run_ae.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
+#python3 run_experiment.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
 #--batch_size 1024 --embedding_dim $DIM --dataset=imdb
 #
-#python3 run_ae.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
+#python3 run_experiment.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
 #--batch_size 512 --embedding_dim $DIM --dataset=rotten_tomatoes
 
 python3 run_ae.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \

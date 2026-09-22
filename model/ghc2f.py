@@ -1,22 +1,20 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 from torch import nn
 from model.gated_hybrid_ae import GatedHybridCFAutoEncoder
-from utils.utils import MSEloss
+
 
 
 class GHC2F(GatedHybridCFAutoEncoder):
     def __init__(
         self,
         *ae_args,
-        contrastive_target: str = "text",   # "text" (fixed) | "collaborative" (legacy, for ablation)
-        stop_grad_cf: bool = True,          # only matters when contrastive_target == "collaborative"
-        dual_head_decoder: bool = True,
+        contrastive_target: str = "text",
+        stop_grad_cf: bool = True,
         cl_weight: float = 0.1,
         reg_weight: float = 1e-5,
-        mmse_weight: float = 1.0,      
-        mmse_weight_cf : float = 1.0,
-        gate_entropy_weight: float = 0.0,   # new: 0.0 = off by default, sweep to enable
+        gate_entropy_weight: float = 0.0,
         **ae_kwargs,
     ):
         super().__init__(*ae_args, **ae_kwargs)
@@ -25,50 +23,48 @@ class GHC2F(GatedHybridCFAutoEncoder):
 
         self.bottleneck_dim = ae_kwargs['layer_sizes'][-1]
 
-        self.item_projection = nn.Linear(self.item_input_dim, self.bottleneck_dim).to(self.device)
 
         if self.item_input_dim != self.bottleneck_dim:
             self.item_aligner = nn.Linear(self.item_input_dim, self.bottleneck_dim)
         else:
             self.item_aligner = nn.Identity()
 
-        assert contrastive_target in ("text", "collaborative"), \
-            f"contrastive_target must be 'text' or 'collaborative', got {contrastive_target}"
+        if contrastive_target not in ("text", "collaborative"):
+            raise ValueError(f"Unknown contrastive_target: {contrastive_target!r}")
+
         self.contrastive_target = contrastive_target
         self.stop_grad_cf = stop_grad_cf
-        self.dual_head_decoder = dual_head_decoder
         self.cl_weight = cl_weight
         self.reg_weight = reg_weight
-        self.mmse_weight = mmse_weight
-        self.mmse_weight_cf = mmse_weight_cf
         self.gate_entropy_weight = gate_entropy_weight
+
+        learn_rate = self.optimizer.param_groups[0]['lr']
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learn_rate)
 
     def get_item_embeddings(self):
         raw_weights = self.encoder[0].weight.t()
         return self.item_aligner(raw_weights)
 
-    def forward_bpr(self, batch):
-        out = self.forward(batch)  # was: z_fused, _, _, _ = self.forward(batch)
+    def _score_items(self, z_fused, item_ids):
+        """
+        item_ids: (B,)   -> one item per row (e.g. a single pos/neg during
+                             training). Returns (B,).
+        item_ids: (B, K) -> K candidate items per row (e.g. evaluate()'s
+                             [pos, neg_1..neg_99]). Returns (B, K).
+        """
+        logits = self.decode(z_fused)  # (B, num_items)
+        if item_ids.dim() == 1:
+            return torch.gather(logits, 1, item_ids.unsqueeze(-1)).squeeze(-1)
+        return torch.gather(logits, 1, item_ids)
 
-        raw_item_embeddings = self.get_item_embeddings()
 
-        pos_item_ids = batch["pos_item_id"]
-        neg_item_ids = batch["neg_item_id"]
-
-        w_pos = raw_item_embeddings[pos_item_ids]
-        w_neg = raw_item_embeddings[neg_item_ids]
-
-        pos_scores = (out.z_fused * w_pos).sum(dim=-1)
-        neg_scores = (out.z_fused * w_neg).sum(dim=-1)
-
-        return pos_scores, neg_scores
 
     def contrastive_loss(self, z_fused, target, temperature=0.1):
         """
         Standard InfoNCE loss to align z_fused with `target`.
 
         target is either:
-          - z_topic (T), the projected semantic signal — pulls z_fused toward
+          - z_text (T), the projected semantic signal — pulls z_fused toward
             incorporating text, the fix for this ablation; or
           - z_cf, the raw collaborative code — the ORIGINAL, buggy alignment.
             Kept only for contrastive_target="collaborative" ablation runs,
@@ -104,68 +100,65 @@ class GHC2F(GatedHybridCFAutoEncoder):
     def calculate_loss(self, batch):
         out = self.forward(batch)
 
-        loss_bpr = F.softplus(out.neg_scores - out.pos_scores).mean()
+        loss_bpr = F.softplus(out.neg_scores.squeeze(-1) - out.pos_scores.squeeze(-1)).mean()
 
-        # --- contrastive alignment ---
-        if self.contrastive_target == "text":
-            cl_target = out.z_topic
-        else:
-            cl_target = out.z_cf.detach() if self.stop_grad_cf else out.z_cf
-
-        loss_cl = self.contrastive_loss(out.z_fused, cl_target)
-
-        # --- reconstruction (dual-head MMSE) ---
-        loss_mmse_fused, _ = MSEloss(out.recon, batch["ratings_in"], size_average=True)
-
-        if self.dual_head_decoder:
-            recon_cf = self.decode(out.z_cf)
-            loss_mmse_cf, _ = MSEloss(recon_cf, batch["ratings_in"], size_average=True)
-            loss_mmse =  (self.mmse_weight_fused * loss_mmse_fused
-                         + self.mmse_weight_cf * loss_mmse_cf)
-
-        else:
-            loss_mmse = loss_mmse_fused
+        loss_cl = self.contrastive_loss(out.z_fused, out.z_text)
 
         # --- gate entropy regularizer ---
         loss_gate = self.gate_entropy_loss(out.gate_values)
 
-        # --- L2 regularization (unchanged) ---
+        # --- L2 regularization  ---
         item_embeddings = self.get_item_embeddings()
         reg_loss = (torch.norm(item_embeddings[batch["pos_item_id"]]) ** 2 +
-                    torch.norm(item_embeddings[batch["neg_item_id"]]) ** 2 +
-                    torch.norm(batch["ratings_in"]) ** 2)
+                    torch.norm(item_embeddings[batch["neg_item_id"]]) ** 2 )
 
         total_loss = (
             loss_bpr
             + self.cl_weight * loss_cl
             + self.reg_weight * reg_loss
-            + self.mmse_weight * loss_mmse
             + self.gate_entropy_weight * loss_gate
         )
 
+        self.last_loss_components = {
+            "bpr": loss_bpr.item(),
+            "cl": loss_cl.item(),
+            "gate": loss_gate.item() if torch.is_tensor(loss_gate) else float(loss_gate),
+            "reg": reg_loss.item() if torch.is_tensor(reg_loss) else float(reg_loss),
+        }
+
         return total_loss, batch["user_ids"].size(0)
 
-    @torch.no_grad()
-    def predict_step(self, batch):
-        """
-        Optimized for Leave-One-Out Evaluation.
-        Returns:
-            - all_scores: The predicted scores for all items (B, num_items)
-            - target_item: The ground truth item ID (B,)
-        """
-        all_scores = self.predict_unseen(batch)
-        target_item = batch["target_item"].to(self.device)
-        return all_scores, target_item
 
-    @torch.no_grad()
-    def predict_unseen(self, batch):
+    def evaluate(self, test_loader, k=10):
         self.eval()
-        out = self.forward(batch)  # was: _, z_fused, _ = self.forward(batch)
+        hr_list, ndcg_list, mrr_list = [], [], []
 
-        item_embeddings = self.get_item_embeddings()
-        all_scores = torch.matmul(out.z_fused, item_embeddings.t())
+        with torch.no_grad():
+            for batch in test_loader:
+                batch = {k_: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                         for k_, v in batch.items()}
 
-        ratings_in = batch["ratings_in"]
-        all_scores[ratings_in > 0] = -1e9
+                out = self.forward(batch)
 
-        return all_scores
+                pos_items = batch["pos_item_id"].unsqueeze(-1)
+                neg_items = batch["neg_item_id"]
+                target_indices = torch.cat([pos_items, neg_items], dim=1)  # (B, 1+num_neg)
+
+                test_scores = self._score_items(out.z_fused, target_indices)
+                pos_scores = test_scores[:, 0].unsqueeze(1)
+                ranks = (test_scores > pos_scores).sum(dim=1) + 1
+                ranks_cpu = ranks.cpu().numpy()
+
+                hits = (ranks_cpu <= k).astype(float)
+                hr_list.extend(hits)
+
+                ndcgs = np.where(ranks_cpu <= k, 1 / np.log2(ranks_cpu + 1), 0.0)
+                ndcg_list.extend(ndcgs)
+
+                mrr_list.extend(1 / ranks_cpu)
+
+        return {
+            'hit_rate': float(np.mean(hr_list)),
+            'ndcg': float(np.mean(ndcg_list)),
+            'mrr': float(np.mean(mrr_list)),
+        }

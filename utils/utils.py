@@ -1,9 +1,8 @@
-from typing import Tuple, Dict, Any
+from typing import Tuple
 import numpy as np
 import pandas as pd
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset
 
 
 def MSEloss(
@@ -32,8 +31,8 @@ def MSEloss(
     return loss, norm
 
 
-def prepare_inputs(df, entity_col, topic_col_names, max_reviews=50):
-    vectors = df[topic_col_names].values
+def prepare_inputs(df, entity_col, col_names, max_reviews=50):
+    vectors = df[col_names].values
 
     # Create a temporary series to group
     temp_df = pd.DataFrame({
@@ -42,7 +41,7 @@ def prepare_inputs(df, entity_col, topic_col_names, max_reviews=50):
     })
 
     # Group by User/Item
-    grouped = temp_df.groupby(entity_col)['vec'].apply(lambda x: x[:max_reviews]).reset_index()
+    grouped = temp_df.groupby(entity_col)['vec'].apply(lambda x: list(x)[:max_reviews]).reset_index()
 
     # Extract IDs
     ids = torch.tensor(grouped[entity_col].values, dtype=torch.long)
@@ -99,87 +98,4 @@ class EarlyStoppingRanking:
                 print("Best state restored...")
 
 
-def train_collate_fn_aspect(batch, text_embeddings, user_reviews_dict):
-    user_ids = torch.tensor([x['user_id'] for x in batch])
-    pos_item_ids = torch.tensor([x['pos_item_id'] for x in batch])
-    neg_item_ids = torch.tensor([x['neg_item_id'] for x in batch])
-    ratings_in = torch.stack([x['ratings_in'] for x in batch])
 
-    pos_text_seq = torch.stack([x['pos_text_seq'] for x in batch])
-    neg_text_seq = torch.stack([x['neg_text_seq'] for x in batch])
-
-    # 2. Gerar histórico do usuário (Média das reviews passadas)
-    user_histories = []
-    for u in user_ids.tolist():
-        h_idx = user_reviews_dict[u]
-        # Pegamos a média dos embeddings das reviews que o usuário já fez
-        u_emb = text_embeddings[h_idx].mean(dim=0, keepdim=True)
-        user_histories.append(u_emb)
-
-    user_history_text = torch.stack(user_histories)  # [B, 1, 768]
-
-    return {
-        "user_ids": user_ids,
-        "pos_item_id": pos_item_ids,
-        "neg_item_id": neg_item_ids,
-        "ratings_in": ratings_in,
-        "pos_text_seq": pos_text_seq,
-        "neg_text_seq": neg_text_seq,
-        "user_history_text": user_history_text
-    }
-
-
-
-class AspectDataset(Dataset):
-    def __init__(self, user_item_matrix, df, all_review_embeddings):
-        self.matrix = user_item_matrix
-        self.df = df
-        self.review_embeddings = torch.from_numpy(all_review_embeddings).float()
-        # Agrupamos os índices das reviews por usuário
-        unique_users = df['userId'].unique()
-        self.user_to_matrix_idx = {user: i for i, user in enumerate(unique_users)}
-        unique_items = df['itemId'].unique()
-        self.item_to_matrix_idx = {item: i for i, item in enumerate(unique_items)}
-
-        self.user_reviews_idx = self.df.groupby('userId').indices
-        self.item_repr = {k: list(v) for k, v in self.df.groupby('itemId').indices.items()}
-        self.user_interactions = self.df.groupby('userId')['itemId'].apply(set).to_dict()
-
-        self.num_items = user_item_matrix.shape[1]
-        self.all_items = np.arange(self.num_items)
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        user_id = int(row['userId'])
-        pos_item_id = int(row['itemId'])
-
-        # 1. Sorteio do Negativo
-        neg_item_id = np.random.choice(self.all_items)
-        while neg_item_id in self.user_interactions.get(user_id, set()):
-            neg_item_id = np.random.choice(self.all_items)
-
-        # 2. Pegar os embeddings de texto
-        # O positivo é a review da linha atual
-        pos_text = self.review_embeddings[idx].unsqueeze(0)
-
-        # O NEGATIVO: Como ele não tem uma "review" associada a essa interação,
-        # pegamos uma review qualquer que exista para esse item negativo na base.
-        # Se o item não tiver reviews, usamos um vetor de zeros ou a média global.
-        neg_review_indices = self.item_repr.get(neg_item_id, [])
-        if len(neg_review_indices) > 0:
-            random_neg_idx = np.random.choice(neg_review_indices)
-            neg_text = self.review_embeddings[random_neg_idx].unsqueeze(0)
-        else:
-            neg_text = torch.zeros((1, 768))  # Vetor nulo se o item for "frio"
-
-        return {
-            "user_id": user_id,
-            "pos_item_id": pos_item_id,
-            "neg_item_id": neg_item_id,
-            "pos_text_seq": pos_text,
-            "neg_text_seq": neg_text,  # <--- A CHAVE QUE ESTAVA FALTANDO
-            "ratings_in": torch.from_numpy(self.matrix[user_id].toarray()).float().squeeze()
-        }

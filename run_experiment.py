@@ -5,13 +5,15 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
-# models ####
+
+############## MODELS ##############
+from model.cf_autoencoder import CFAutoEncoder
 from model.ghc2f import GHC2F
 from model.gated_hybrid_ae import GatedHybridCFAutoEncoder
-# from model.aspectgh2f import AspectGHC2F
-############
+############## MODELS ##############
 from utils.utils import prepare_inputs, EarlyStoppingRanking
 from utils.dataset_utils import RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix
+from utils.dataset_utils import build_interacted_by_user
 from utils.leave_one_out_cv import get_loocv_fold_normalized
 from utils.train_model import train_model
 
@@ -91,23 +93,40 @@ def main():
         model.item_global_profiles = full_i_global
         train_matrix = create_sparse_matrix(train, TOTAL_USERS, TOTAL_ITEMS)
 
+        # Per-user text profiles (RankingTrainDataset.user_text_map) must only
+        # ever see reviews the user has actually written by that point in the
+        # split. df_text is row-aligned with the *full* dataset (train+val+test),
+        # so passing it in unfiltered would leak a user's own review for their
+        # held-out val/test item into "user_text" (fed to TextProfile's
+        # attention), trivially revealing the item being ranked.
+        def text_seen_through(history_df):
+            pairs = pd.MultiIndex.from_frame(history_df[["userId", "itemId"]])
+            df_text_pairs = pd.MultiIndex.from_frame(df_text[["userId", "itemId"]])
+            return df_text[df_text_pairs.isin(pairs)].copy()
+
+        df_text_train_only = text_seen_through(train)
+
         train_loader = DataLoader(
-            RankingTrainDataset(train_matrix, df_text, train),
+            RankingTrainDataset(train_matrix, df_text_train_only, train),
             batch_size=args.batch_size, shuffle=True, collate_fn=train_collate_fn, num_workers=4
         )
 
+        interacted_train = build_interacted_by_user(train)
         val_loader = DataLoader(
-            RankingTrainDataset(train_matrix, df_text, val),
-            batch_size=args.batch_size, shuffle=False, collate_fn=lambda x: loocv_collate_fn(x, train), num_workers=4
+            RankingTrainDataset(train_matrix, df_text_train_only, val),
+            batch_size=args.batch_size, shuffle=False,
+            collate_fn=lambda x: loocv_collate_fn(x, interacted_train, TOTAL_ITEMS), num_workers=4
         )
 
         test_relevant = test[test["is_relevant"] == True].copy()
 
         history_for_test = pd.concat([train, val])
+        df_text_train_val = text_seen_through(history_for_test)
+        interacted_hist = build_interacted_by_user(history_for_test)
         test_loader_ranking = DataLoader(
-            RankingTrainDataset(train_matrix, df_text, test_relevant),
+            RankingTrainDataset(train_matrix, df_text_train_val, test_relevant),
             batch_size=args.batch_size, shuffle=False,
-            collate_fn=lambda x: loocv_collate_fn(x, history_for_test),
+            collate_fn=lambda x: loocv_collate_fn(x, interacted_hist, TOTAL_ITEMS),
             num_workers=4
         )
 

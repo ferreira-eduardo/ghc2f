@@ -1,7 +1,5 @@
-import numpy as np
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 from utils.text_att_profile import TextProfile
 from model.cf_autoencoder import CFAutoEncoder, AEOutput
@@ -15,7 +13,7 @@ from typing import List
 class GatedAEOutput(AEOutput):
     z_fused: torch.Tensor = None
     z_cf: torch.Tensor = None
-    z_topic: torch.Tensor = None
+    z_text: torch.Tensor = None
     gate_values: List[torch.Tensor] = field(default_factory=list)
     pos_scores: torch.Tensor = None
     neg_scores: torch.Tensor = None
@@ -23,19 +21,23 @@ class GatedAEOutput(AEOutput):
 
 class GatedHybridCFAutoEncoder(CFAutoEncoder):
     def __init__(self, layer_sizes, num_users, num_items, text_dim=15,
-                 text_latent_dim=64, topic_gamma=0.5, **kwargs):
+                 text_latent_dim=64, text_gamma=0.5, fusion_mode="film", **kwargs):
+
         super().__init__(layer_sizes, **kwargs)
         self.name = 'GatedHybrid'
 
+        self.fusion_mode = fusion_mode
+
         enc_dims = [out_dim for _, out_dim in zip(layer_sizes[:-1], layer_sizes[1:])]
 
-        self.topic_gamma = topic_gamma
+        self.text_gamma = text_gamma
 
         self.code_dim_cf = layer_sizes[-1]
 
         self.text_to_enc = nn.ModuleList([
             nn.Linear(self.code_dim_cf, d) for d in enc_dims
         ])
+
         self.gate_enc = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(d * 2, d),
@@ -43,10 +45,20 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
             ) for d in enc_dims
         ])
 
+        if fusion_mode in ("convex", "additive"):
+            self.gate_enc = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(d * 2, d),
+                    nn.Sigmoid()
+                ) for d in enc_dims
+            ])
+        else:  # film -- built only when selected, so convex/additive don't
+            # pay for unused parameters
+            self.film_scale = nn.ModuleList([nn.Linear(d, d) for d in enc_dims])
+            self.film_shift = nn.ModuleList([nn.Linear(d, d) for d in enc_dims])
+
         self.fuse_all_layers = True
         self.enc_norms = nn.ModuleList([nn.LayerNorm(d) for d in enc_dims])
-
-        self.register_buffer("item_global_profiles", None)
 
         # User profiler (Interactions in trainset)
         self.user_profiler = TextProfile(num_users, text_dim, text_latent_dim)
@@ -54,16 +66,23 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         # Item profiler (Global view - reviews independent of the current user)
         self.item_profiler = TextProfile(num_items, text_dim, text_latent_dim)
 
-        # Projection layers to align topic space with CF space (code_dim)
+        # Projection layers to align text space with CF space (code_dim)
         self.user_proj = nn.Linear(text_dim, self.code_dim_cf)
         self.item_proj = nn.Linear(text_dim, self.code_dim_cf)
 
+        self.register_buffer("item_corpus_ids", None)
+        self.register_buffer("item_corpus_text", None)
+        self.register_buffer("item_corpus_mask", None)
+
         self.gate_drop = nn.Dropout(p=0.2)
 
-    def encode_with_text(self, x, z_topic_base):
+        learn_rate = self.optimizer.param_groups[0]['lr']
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learn_rate)
+
+    def encode_with_text(self, x, z_text_base):
         """
         x: (B, num_items)
-        z_topic_base: (B, code_dim_cf)
+        z_text_base: (B, code_dim_cf)
 
         Returns
         -------
@@ -84,16 +103,44 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
                 h = F.relu(h)
 
             do_fuse = self.fuse_all_layers or (li == last_idx)
+
             if do_fuse:
-                t = self.text_to_enc[li](z_topic_base)  # (B, out_dim)
-                g = self.gate_enc[li](torch.cat([h, t], dim=-1))
-                g = self.gate_drop(g)
-                h = g * h + (1.0 - g) * t
+                t = self.text_to_enc[li](z_text_base)  # (B, out_dim)
+
+                if self.fusion_mode == "convex":
+                    h_d = self.gate_drop(h)
+                    t_d = self.gate_drop(t)
+                    g = self.gate_enc[li](torch.cat([h_d, t_d], dim=-1))
+                    h = g * h + (1.0 - g) * t
+                    gate_values.append(g)
+
+                elif self.fusion_mode == "additive":
+                    h_d = self.gate_drop(h)
+                    t_d = self.gate_drop(t)
+                    g = self.gate_enc[li](torch.cat([h_d, t_d], dim=-1))
+                    h = h + g * t  # only added to
+                    gate_values.append(g)
+                else: #film
+                    t_d = self.gate_drop(t)
+                    gamma = self.film_scale[li](t_d)
+                    beta = self.film_shift[li](t_d)
+                    h = h * (1 + gamma) + beta
+                    gate_values.append(gamma)
+
                 h = self.enc_norms[li](h)
-                gate_values.append(g)
 
         h = self.drop(h)
+
         return h, gate_values
+
+    def set_item_corpus(self, item_ids: torch.Tensor, item_text: torch.Tensor, item_mask: torch.Tensor):
+        """
+        Call once after construction. Stores the RAW item corpus
+        """
+        self.item_corpus_ids = item_ids.to(self.device)
+        self.item_corpus_text = item_text.to(self.device)
+        self.item_corpus_mask = item_mask.to(self.device)
+
 
     def forward(self, batch) -> GatedAEOutput:
         ratings_in = batch["ratings_in"].to(self.device)
@@ -105,18 +152,26 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         u_text = batch["user_text"].to(self.device)
         u_mask = batch["user_mask"].to(self.device)
 
-        z_user_topic = self.user_profiler(u_ids, u_text, u_mask)
-        topic_user = self.user_proj(z_user_topic)
+        z_user_text = self.user_profiler(u_ids, u_text, u_mask)
+        text_user = self.user_proj(z_user_text)
 
-        item_global = self.item_global_profiles
+        item_profiles = self.item_profiler( # (num_corpus_items, text_dim)
+            self.item_corpus_ids, self.item_corpus_text, self.item_corpus_mask
+        )
+
+        item_global = torch.zeros((ratings_in.size(1), item_profiles.size(1)), device=self.device)
+        item_global = item_global.index_copy(0, self.item_corpus_ids, item_profiles)
+
         hist_mask = (ratings_in != 0).float()
+
         interaction_counts = hist_mask.sum(dim=1, keepdim=True)
-        topic_item_global = (hist_mask @ item_global) / interaction_counts.clamp_min(1.0)
-        topic_item = self.item_proj(topic_item_global)
+        text_item_global = (hist_mask @ item_global) / interaction_counts.clamp_min(1.0)
+        text_item = self.item_proj(text_item_global)
 
-        z_topic = self.topic_gamma * topic_user + (1 - self.topic_gamma) * topic_item
 
-        z_fused, gate_values = self.encode_with_text(ratings_in, z_topic)
+        z_text = self.text_gamma * text_user + (1 - self.text_gamma) * text_item
+
+        z_fused, gate_values = self.encode_with_text(ratings_in, z_text)
 
         logits = self.decode(z_fused)
 
@@ -136,7 +191,7 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
             code=z_fused,
             z_fused=z_fused,
             z_cf=z_cf,
-            z_topic=z_topic,
+            z_text=z_text,
             gate_values=gate_values,
             pos_scores=pos_scores,
             neg_scores=neg_scores,
@@ -149,60 +204,31 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
 
         loss = -torch.log(torch.sigmoid(out.pos_scores - out.neg_scores) + 1e-10).mean()
 
+        self.last_loss_components = {"bpr": loss.item()}
+
         return loss, user_ids.size(0)
 
+
     @torch.no_grad()
-    def predict_step(self, batch):
+    def gate_diagnostics(self, batch):
         """
-        Extracts ratings_tgt and compares it against model predictions.
+        Cheap, no-retrain diagnostic: mean/std of each layer's gate g_l on a
+        single forward pass. Values clustering near 1 across a batch
+        indicate the gate is suppressing the text signal (h_fused ~= h_cf);
+        values near 0 indicate the opposite. Call with any val/train batch.
+        Mirrors GHC2F.gate_diagnostics so both classes report identically.
         """
-        ratings_tgt = batch["ratings_tgt"].to(self.device)
-
-        out = self(batch)
-        y_hat = out.recon
-
-        mask = ratings_tgt != 0
-
-        y_true_flat = ratings_tgt[mask]
-        y_pred_flat = y_hat[mask]
-
-        return y_true_flat, y_pred_flat
-
-    def evaluate(self, test_loader, k=10):
         self.eval()
-        hr_list, ndcg_list, mrr_list = [], [], []
-
-        pbar = tqdm(test_loader, desc="Evaluating", leave=False)
-
-        with torch.no_grad():
-            for batch in pbar:
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                         for k, v in batch.items()}
-
-                out = self(batch)
-                logits = out.recon  # was: out[0] if isinstance(out, (tuple, list)) else out
-
-                pos_items = batch["pos_item_id"].unsqueeze(-1)
-                neg_items = batch["neg_item_id"]
-                target_indices = torch.cat([pos_items, neg_items], dim=1)
-
-                test_scores = torch.gather(logits, 1, target_indices)
-
-                pos_scores = test_scores[:, 0].unsqueeze(1)
-                ranks = (test_scores > pos_scores).sum(dim=1) + 1
-
-                ranks_cpu = ranks.cpu().numpy()
-
-                hits = (ranks_cpu <= k).astype(float)
-                hr_list.extend(hits)
-
-                ndcgs = np.where(ranks_cpu <= k, 1 / np.log2(ranks_cpu + 1), 0.0)
-                ndcg_list.extend(ndcgs)
-
-                mrr_list.extend(1 / ranks_cpu)
-
-        return {
-            'hit_rate': float(np.mean(hr_list)),
-            'ndcg': float(np.mean(ndcg_list)),
-            'mrr': float(np.mean(mrr_list))
-        }
+        batch = {k_: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                 for k_, v in batch.items()}
+        out = self.forward(batch)
+        rows = []
+        for li, g in enumerate(out.gate_values):
+            rows.append({
+                "layer": li,
+                "mean": g.mean().item(),
+                "std": g.std().item(),
+                "frac_above_0.9": (g > 0.9).float().mean().item(),
+                "frac_below_0.1": (g < 0.1).float().mean().item(),
+            })
+        return rows

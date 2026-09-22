@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import numpy as np
@@ -19,6 +18,7 @@ def preprocess_aspects(df: pd.DataFrame, min_confidence: float = 0.5) -> pd.Data
                       prob_pos, prob_neu, prob_neg
     """
     df = df.loc[df["confidence"] >= min_confidence].copy()
+    df = df.dropna(subset=["aspect"])
 
     df["polarity"] = df["prob_pos"] - df["prob_neg"]  # in [-1, 1]
     df["weight"] = (
@@ -26,6 +26,7 @@ def preprocess_aspects(df: pd.DataFrame, min_confidence: float = 0.5) -> pd.Data
         * df["confidence"]
         * df["polarity"].abs()
     )
+
     df["weight"] = df["weight"].clip(lower=1e-4)
     return df
 
