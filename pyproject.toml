@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Gated Hybrid Autoencoder Review-based"
 requires-python = "==3.10.*"
 dependencies = [
+    "accelerate>=1.15.0",
     "ipykernel>=7.2.0",
     "moocore>=0.2.0",
     "numpy>=2.2.6",
@@ -19,6 +20,7 @@ dependencies = [
     "scipy>=1.15.3",
     "scipy-stubs~=1.15.3",
     "seaborn>=0.13.2",
+    "sentence-transformers>=5.7.0",
     "sentencepiece>=0.2.2",
     "spacy>=3.8.15",
     "torch>=2.10.0",

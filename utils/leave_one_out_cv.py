@@ -44,3 +44,22 @@ def get_loocv_fold_normalized(df: pd.DataFrame, k_fold_index: int):
     test_set = normalize(test_set, user_stats)
 
     return train_set, val_set, test_set
+
+
+def export_split(df: pd.DataFrame, k_fold_index: int, path: str) -> pd.DataFrame:
+    """
+    Writes {review_idx, split} for the exact fold produced by
+    get_loocv_fold_normalized, so the aspect profiles
+    (utils/text_aspects_profile.py --split_path) are built from the same
+    train reviews the model trains on. df must carry a review_idx column.
+    """
+    train, val, test = get_loocv_fold_normalized(df, k_fold_index)
+    split = pd.concat([
+        pd.DataFrame({"review_idx": train["review_idx"].values, "split": "train"}),
+        pd.DataFrame({"review_idx": val["review_idx"].values, "split": "val"}),
+        pd.DataFrame({"review_idx": test["review_idx"].values, "split": "test"}),
+    ], ignore_index=True)
+    assert split["review_idx"].is_unique, "a review was assigned to more than one split"
+    split.to_csv(path, index=False)
+    print(f"  Split (fold {k_fold_index}) -> {path}: {split['split'].value_counts().to_dict()}")
+    return split

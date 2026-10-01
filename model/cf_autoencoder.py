@@ -217,7 +217,7 @@ class CFAutoEncoder(nn.Module):
             popularity_topk_ids = popularity_topk_from_train(item_popularity, k_pop)
             item_emb = self.item_embeddings_
             novelty_sum = diversity_sum = serendipity_sum = 0.0
-            diversity_n = 0  # separate counter: diversity excludes NaN (k=1) users
+            diversity_n = 0
 
         with torch.inference_mode():
             for batch in tqdm(test_loader, desc="Evaluating", leave=not verbose_tqdm is False,
@@ -242,26 +242,13 @@ class CFAutoEncoder(nn.Module):
                 n += ranks.numel()
 
                 if compute_beyond_acc:
-                    # Full-catalog scoring pass (item_indices=None -> decode()
-                    # returns (B, num_items)), separate from the sampled-
-                    # candidate scores above. This is the only way to get a
-                    # genuine top-k recommendation list -- novelty/diversity/
-                    # serendipity computed on the tiny {1 pos + N neg} set
-                    # used for hit_rate/ndcg/mrr would be meaningless.
                     full_out = self(batch, item_indices=None)
                     full_scores = full_out.recon  # (B, num_items)
 
-                    # Mask out items already seen in train -- standard
-                    # practice: don't "recommend" what the user already has.
                     seen_mask = batch["ratings_in"] > 0
                     full_scores = full_scores.masked_fill(seen_mask, float("-inf"))
 
                     topk_ids = torch.topk(full_scores, k, dim=1).indices  # (B, k)
-
-                    # hit_mask for serendipity: does this genuine top-k contain
-                    # the user's true positive? (independent check from the
-                    # sampled-candidate hit_rate above -- different candidate
-                    # pool, so don't reuse `ranks` here.)
                     pos_id = batch["pos_item_id"].unsqueeze(-1)  # (B, 1)
                     hit_mask = (topk_ids == pos_id)  # (B, k) bool
 

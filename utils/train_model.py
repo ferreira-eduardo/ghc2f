@@ -8,8 +8,11 @@ def train_model(
         train_loader,
         val_loader,
         early_stopping,
+        epoch_callback=None,
 ):
     """
+    epoch_callback(epoch, val_hit_rate) is called after each validation
+    (e.g. Optuna reporting/pruning; it may raise to stop the run).
     """
     device = model.device if hasattr(model, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -57,6 +60,9 @@ def train_model(
 
         if hit_rate > best_val_metric:
             best_val_metric = hit_rate
+
+        if epoch_callback is not None:
+            epoch_callback(epoch, hit_rate)
 
         if early_stopping.early_stop:
             print("Early stopping triggered")
