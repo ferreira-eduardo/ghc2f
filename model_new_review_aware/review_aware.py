@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from collaborative_branch import CollaborativeBranch
-from fielder_match import FieldMatcher, FieldProjector
-from text_encoder import TextEncoder
+from model_new_review_aware.collaborative_branch import CollaborativeBranch
+from model_new_review_aware.fielder_match import FieldMatcher, FieldProjector
+from model_new_review_aware.text_encoder import TextEncoder
 
 USER_FIELDS = ("likes", "dislikes", "context")
 ITEM_FIELDS = ("summary", "strengths", "weaknesses", "suits")

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from review_aware import ITEM_FIELDS, USER_FIELDS, Batch
+from model_new_review_aware.review_aware import ITEM_FIELDS, USER_FIELDS, Batch
 
 Profiles = dict[object, dict[str, str]]  # ID bruto -> {campo: texto}
 
@@ -85,9 +85,20 @@ class BatchBuilder:
         self.item_profiles = item_profiles
 
     def __call__(self, rows: list[dict]) -> Batch:
+        return self.build([r["user"] for r in rows], [r["item"] for r in rows],
+                          [r["rating"] for r in rows], [r["liked"] for r in rows])
+
+    def build(self, users: list, items: list, ratings: list | None = None,
+              liked: list | None = None) -> Batch:
+        """Monta um Batch a partir de IDs brutos.
+
+        No treino, users e items são pares alinhados. Na avaliação, podem ter
+        tamanhos diferentes (usuários contra o catálogo, com in_batch=True);
+        ratings e liked ficam vazios porque não são usados ali.
+        """
         s = self.stats
-        users = [r["user"] for r in rows]
-        items = [r["item"] for r in rows]
+        ratings = ratings if ratings is not None else [0.0] * len(users)
+        liked = liked if liked is not None else [False] * len(users)
 
         def texts(profiles: Profiles, ids: list, fields: tuple[str, ...]) -> dict[str, list[str]]:
             return {f: [profiles.get(x, {}).get(f, "") for x in ids] for f in fields}
@@ -98,32 +109,11 @@ class BatchBuilder:
         return Batch(
             users=torch.tensor([s.user_index.get(u, 0) for u in users]),
             items=torch.tensor([s.item_index.get(i, 0) for i in items]),
-            ratings=floats([r["rating"] for r in rows]),
-            liked=torch.tensor([bool(r["liked"]) for r in rows]),
+            ratings=floats(ratings),
+            liked=torch.tensor([bool(x) for x in liked]),
             item_log_q=floats([s.item_log_q.get(i, 0.0) for i in items]),
             user_texts=texts(self.user_profiles, users, USER_FIELDS),
             item_texts=texts(self.item_profiles, items, ITEM_FIELDS),
             user_features=floats([s.user_features(u, self.user_profiles) for u in users]),
             item_features=floats([s.item_features(i, self.item_profiles) for i in items]),
         )
-
-if "__main__" == __name__:
-    from torch.utils.data import DataLoader
-    from threshold import user_thresholds, mark_liked
-
-    
-    thresholds, fallback = user_thresholds(train)
-    train = mark_liked(train, thresholds, fallback)
-    val = mark_liked(val, thresholds, fallback)
-
-    train_users = load_profiles(train_user_df, "user", USER_FIELDS)
-    train_items = load_profiles(train_item_df, "item", ITEM_FIELDS)
-    stats = TrainStats.from_train(train, train_users, train_items)
-
-    loader = DataLoader(
-        train[["user", "item", "rating", "liked"]].to_dict("records"),
-        batch_size=512, shuffle=True,
-        collate_fn=BatchBuilder(stats, train_users, train_items),
-    )
-    batch = next(iter(loader))
-    print(batch.users.shape, batch.user_features.shape, len(batch.user_texts["likes"]))
