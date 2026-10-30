@@ -8,7 +8,7 @@ dependencies = [
     "ipykernel>=7.2.0",
     "moocore>=0.2.0",
     "numpy>=2.2.6",
-    "optimum[onnxruntime-gpu]>=2.1.0",
+#    "optimum[onnxruntime-gpu]>=2.1.0",
     "optuna>=4.7.0",
     "pandas>=2.3.3",
     "pandas-stubs~=2.3.3",
@@ -23,6 +23,6 @@ dependencies = [
     "sentence-transformers>=5.7.0",
     "sentencepiece>=0.2.2",
     "spacy>=3.8.15",
-    "torch>=2.10.0",
+#    "torch>=2.10.0",
     "tqdm>=4.67.3",
 ]
