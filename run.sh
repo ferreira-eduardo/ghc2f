@@ -11,7 +11,7 @@ DROPOUT=0.5
 
 # Setup Environment
 export PYTHONPATH=$PYTHONPATH:$(pwd)
-mkdir -p outputs/
+mkdir -p outputs\
 
 # Run Training
 echo "Starting GHC2F..."

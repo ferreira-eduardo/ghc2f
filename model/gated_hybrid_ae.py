@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from utils.text_att_profile import TextProfile
-from model.cf_autoencoder import CFAutoEncoder, AEOutput
+from model.cf_autoencoder import CFAutoEncoder, AEOutput, activation
 import torch.nn.functional as F
 
 from dataclasses import dataclass, field
@@ -38,12 +38,8 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
             nn.Linear(self.code_dim_cf, d) for d in enc_dims
         ])
 
-        self.gate_enc = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d * 2, d),
-                nn.Sigmoid()
-            ) for d in enc_dims
-        ])
+        if fusion_mode not in ("convex", "additive", "film"):
+            raise ValueError(f"Unknown fusion_mode: {fusion_mode!r}")
 
         if fusion_mode in ("convex", "additive"):
             self.gate_enc = nn.ModuleList([
@@ -70,9 +66,11 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         self.user_proj = nn.Linear(text_dim, self.code_dim_cf)
         self.item_proj = nn.Linear(text_dim, self.code_dim_cf)
 
-        self.register_buffer("item_corpus_ids", None)
-        self.register_buffer("item_corpus_text", None)
-        self.register_buffer("item_corpus_mask", None)
+        # Non-persistent: the raw corpus is data, not weights. Keeping it out
+        # of state_dict() avoids copying it on every early-stopping checkpoint.
+        self.register_buffer("item_corpus_ids", None, persistent=False)
+        self.register_buffer("item_corpus_text", None, persistent=False)
+        self.register_buffer("item_corpus_mask", None, persistent=False)
 
         self.gate_drop = nn.Dropout(p=0.2)
 
@@ -100,7 +98,7 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
             h = lin(h)
 
             if li != last_idx:
-                h = F.relu(h)
+                h = activation(h, self._nl_type)
 
             do_fuse = self.fuse_all_layers or (li == last_idx)
 
@@ -142,7 +140,12 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         self.item_corpus_mask = item_mask.to(self.device)
 
 
-    def forward(self, batch) -> GatedAEOutput:
+    def forward(self, batch, item_indices=None) -> GatedAEOutput:
+        """item_indices: optional (B, K) candidate ids. When given, `recon`
+        holds only those K scores (same contract as CFAutoEncoder.forward,
+        which CFAutoEncoder.evaluate relies on)."""
+        if self.item_corpus_ids is None:
+            raise RuntimeError("Call set_item_corpus(...) before forward()")
         ratings_in = batch["ratings_in"].to(self.device)
 
         # collaborative signal
@@ -186,8 +189,10 @@ class GatedHybridCFAutoEncoder(CFAutoEncoder):
         pos_scores = torch.gather(logits, 1, pos_items)
         neg_scores = torch.gather(logits, 1, neg_items)
 
+        recon = logits if item_indices is None else torch.gather(logits, 1, item_indices.to(self.device))
+
         return GatedAEOutput(
-            recon=logits,
+            recon=recon,
             code=z_fused,
             z_fused=z_fused,
             z_cf=z_cf,

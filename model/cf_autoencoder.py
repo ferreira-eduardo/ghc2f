@@ -233,7 +233,8 @@ class CFAutoEncoder(nn.Module):
                 test_scores = out.recon  # (B, K) -- sampled-candidate scores only
 
                 pos_scores = test_scores[:, :1]
-                ranks = (test_scores > pos_scores).sum(dim=1) + 1
+                # ties count against the positive (see GHC2F.evaluate)
+                ranks = (test_scores[:, 1:] >= pos_scores).sum(dim=1) + 1
 
                 hits_sum += (ranks <= k).sum()
                 ndcg_sum += torch.where(ranks <= k, 1.0 / torch.log2(ranks.float() + 1),
