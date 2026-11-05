@@ -111,7 +111,7 @@ def load_dataset(args) -> pd.DataFrame:
 def parse_args():
     p = argparse.ArgumentParser(description="Sliding-window LOO splits shared by recommender and topic profiles")
     p.add_argument("--dataset_name", required=True)
-    p.add_argument("--prepared_dir", default="dataset")
+    p.add_argument("--prepared_dir", default="data")
     p.add_argument("--out_dir", default="splits")
     p.add_argument("--n_folds", type=int, default=5)
     p.add_argument("--user_col", default='userId')

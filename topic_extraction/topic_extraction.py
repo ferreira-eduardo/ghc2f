@@ -7,11 +7,8 @@ import sys
 import time
 import warnings
 
-# numba tries TBB first; the system TBB is too old, so it falls back to OpenMP (still
-# multi-threaded). Setting NUMBA_THREADING_LAYER=omp does NOT work: pynndescent then
-# forces TBB and UMAP crashes. So only silence the warning.
 warnings.filterwarnings("ignore", message="The TBB threading layer requires TBB")
-# expected when --umap_n_jobs 1: the seed forces umap-learn to run on one thread
+
 warnings.filterwarnings("ignore", message="n_jobs value .* overridden to 1 by setting random_state")
 
 import numpy as np

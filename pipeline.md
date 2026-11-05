@@ -1,8 +1,0 @@
-- Load datasets
-- Run Aspects phase -> extraction, new representation
-- Pre-process autoencoder 
-- grid search of best hyperparameters
-- generate the metrics
-- save the outcomes
-- generate graphics 
-
