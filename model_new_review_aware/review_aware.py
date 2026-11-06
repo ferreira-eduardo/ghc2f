@@ -33,6 +33,20 @@ class Batch:
 
 
 @dataclass
+class Side:
+    """Um lado (usuários ou itens) já preparado para o score: IDs, vetores de texto
+    projetados (B, F, d), máscara de presença (B, F) e features do gate (B, f).
+    Permite calcular o lado dos itens uma vez e reaproveitá-lo na avaliação."""
+    ids: Tensor
+    vecs: Tensor | None
+    mask: Tensor | None
+    features: Tensor
+
+    def __getitem__(self, s: slice) -> "Side":
+        return Side(*(None if t is None else t[s] for t in (self.ids, self.vecs, self.mask, self.features)))
+
+
+@dataclass
 class Scores:
     total: Tensor
     collaborative: Tensor
@@ -115,26 +129,38 @@ class ReviewAware(nn.Module):
         in_batch=False: score de cada par (B,).
          in_batch=True: todos contra todos (B, B).
          """
-        users, items = pair(batch.users, batch.items, in_batch)
+        return self.score(self.user_side(batch), self.item_side(batch), in_batch)
+
+    def user_side(self, batch: Batch) -> Side:
+        vecs, mask = (self.encode_fields(batch.user_texts, USER_FIELDS)
+                      if self.text_encoder is not None else (None, None))
+        return Side(batch.users, vecs, mask, batch.user_features)
+
+    def item_side(self, batch: Batch) -> Side:
+        vecs, mask = (self.encode_fields(batch.item_texts, ITEM_FIELDS)
+                      if self.text_encoder is not None else (None, None))
+        return Side(batch.items, vecs, mask, batch.item_features)
+
+    def score(self, u: Side, i: Side, in_batch: bool = False) -> Scores:
+        """Combina os dois lados: pares alinhados (B,) ou todos contra todos (B_u, B_i)."""
+        users, items = pair(u.ids, i.ids, in_batch)
         zeros = torch.zeros(torch.broadcast_shapes(users.shape, items.shape), device=users.device)
 
         s_cf = self.collaborative(users, items) if self.collaborative is not None else zeros
-        s_txt = self._text_score(batch, in_batch) if self.text_encoder is not None else zeros
-        g = self._gate(batch, in_batch) if self.gate is not None else torch.ones_like(zeros)
+        s_txt = self._text_score(u, i, in_batch) if self.text_encoder is not None else zeros
+        g = self._gate(u, i, in_batch) if self.gate is not None else torch.ones_like(zeros)
 
         return Scores(total=s_cf + g * s_txt, collaborative=s_cf, textual=s_txt, gate=g)
 
-    def _text_score(self, batch: Batch, in_batch: bool) -> Tensor:
-        user_vecs, user_mask = self.encode_fields(batch.user_texts, USER_FIELDS)
-        item_vecs, item_mask = self.encode_fields(batch.item_texts, ITEM_FIELDS)
-        user_vecs, item_vecs = pair(user_vecs, item_vecs, in_batch)
-        user_mask, item_mask = pair(user_mask, item_mask, in_batch)
+    def _text_score(self, u: Side, i: Side, in_batch: bool) -> Tensor:
+        user_vecs, item_vecs = pair(u.vecs, i.vecs, in_batch)
+        user_mask, item_mask = pair(u.mask, i.mask, in_batch)
         return self.matcher(user_vecs, item_vecs, user_mask, item_mask)
 
-    def _gate(self, batch: Batch, in_batch: bool) -> Tensor:
-        u, i = pair(batch.user_features, batch.item_features, in_batch)
-        shape = torch.broadcast_shapes(u.shape[:-1], i.shape[:-1])
-        x = torch.cat([u.expand(*shape, -1), i.expand(*shape, -1)], dim=-1)
+    def _gate(self, u: Side, i: Side, in_batch: bool) -> Tensor:
+        uf, itf = pair(u.features, i.features, in_batch)
+        shape = torch.broadcast_shapes(uf.shape[:-1], itf.shape[:-1])
+        x = torch.cat([uf.expand(*shape, -1), itf.expand(*shape, -1)], dim=-1)
         return self.gate(x)
 
     def regularization(self, batch: Batch) -> dict[str, Tensor]:

@@ -1,5 +1,7 @@
+import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 
 import optuna
 
@@ -70,6 +72,17 @@ class HParams:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def save(self, path: str | Path, **meta) -> None:
+        """Salva a configuração completa em JSON, com metadados (estudo, métricas...)."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hparams": self.to_dict(), **meta}, indent=2,
+                                   ensure_ascii=False, default=str))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "HParams":
+        return cls(**json.loads(Path(path).read_text())["hparams"])
 
 
 # ---------- Espaços de busca (Optuna) ----------

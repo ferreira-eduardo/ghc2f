@@ -1,20 +1,9 @@
 #!/bin/bash
 
-BOTTLENECK=512
-LAYERS=4096
-LR=0.0001
-EPOCHS=50
-BATCH_SIZE=1024
-DIM=128
-DROPOUT=0.5
-
-
-# Setup Environment
-export PYTHONPATH=$PYTHONPATH:$(pwd)
-mkdir -p outputs/
-
 # Run Training
-echo "Starting GHC2F..."
+echo "Starting training..."
+
+SEEDS="23 43 2"
 
 
 #python3 run_experiment.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
@@ -23,8 +12,7 @@ echo "Starting GHC2F..."
 #python3 run_experiment.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
 #--batch_size 512 --embedding_dim $DIM --dataset=rotten_tomatoes
 
-python3 run_ae.py --layers $LAYERS --lr $LR --dropout $DROPOUT --epochs $EPOCHS \
---batch_size 512 --embedding_dim $DIM --dataset=amazon
+python3 model_new_review_aware/train.py --hparams=data/all_beauty/tuning/all_beauty-full-high_best.json --seed 23 43 2
 
 
 

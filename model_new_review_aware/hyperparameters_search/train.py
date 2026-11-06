@@ -15,7 +15,10 @@ from model_new_review_aware.review_aware import Gate, ITEM_FIELDS, USER_FIELDS, 
 from model_new_review_aware.hyperparameters_search.hyper_params import HParams
 from model_new_review_aware.losses import ReviewAwareLoss
 from model_new_review_aware.text_encoder import TextEncoder
-from model_new_review_aware.threshold import mark_liked, user_thresholds
+from model_new_review_aware.threshold import mark_liked, rating_levels, user_thresholds
+
+
+ITEM_CHUNK = 8192  # itens por vez na avaliação (limita a memória da GPU)
 
 
 # ---------- Avaliação ----------
@@ -57,6 +60,26 @@ def evaluate(score_fn: Callable[[list], torch.Tensor], rows: pd.DataFrame, catal
         f"recall@{k}": float((ranks < k).mean()),
         "recall@50": float((ranks < 50).mean()),
     }
+
+
+@torch.no_grad()
+def catalog_scorer(model: ReviewAware, builder: BatchBuilder, items: list, device) -> Callable[[list], torch.Tensor]:
+    """score_fn(users) -> (b, N) contra todo o catálogo, para a avaliação.
+
+    O lado dos itens (IDs, vetores de texto projetados, features do gate) não depende
+    do usuário: é calculado uma vez aqui, com os pesos atuais, e reaproveitado em cada
+    pedaço de usuários. Chamar de novo após mudar os pesos. O catálogo é pontuado em
+    pedaços de ITEM_CHUNK itens para limitar a memória da GPU; cada par é pontuado de
+    forma independente, então o resultado é o mesmo que de uma vez só.
+    """
+    catalog = model.item_side(builder.build([], items).to(device))
+
+    def scores(users: list) -> torch.Tensor:
+        u = model.user_side(builder.build(users, []).to(device))
+        return torch.cat([model.score(u, catalog[j:j + ITEM_CHUNK], in_batch=True).total
+                          for j in range(0, len(items), ITEM_CHUNK)], dim=1)
+
+    return scores
 
 
 # ---------- Treino ----------
@@ -105,11 +128,15 @@ def build_model(hp: HParams, stats: TrainStats, encoder: TextEncoder | None) -> 
 def main(hp: HParams = HParams(), root: str = "data/all_beauty",
          output: str | None = "review_aware.pt", eval_chunk: int = 128,
          encoder: TextEncoder | None = None,
-         on_epoch: Callable[[int, dict], None] | None = None) -> dict[str, float]:
+         on_epoch: Callable[[int, dict], None] | None = None,
+         val_sample: int | None = None) -> dict[str, float]:
     """Treina uma configuração e devolve as métricas de validação do melhor estado.
 
-    encoder:  um TextEncoder já aquecido, para reaproveitar o cache entre execuções.
-    on_epoch: chamado com (época, métricas) após cada avaliação; o Optuna o usa para podar.
+    encoder:    um TextEncoder já aquecido, para reaproveitar o cache entre execuções.
+    on_epoch:   chamado com (época, métricas) após cada avaliação; o Optuna o usa para podar.
+    val_sample: se dado, avalia só uma amostra fixa desse número de usuários da validação
+                (a mesma em toda chamada, com qualquer hiperparâmetro). Serve para acelerar
+                a busca nos datasets grandes; o modelo final é avaliado com todos.
     """
     torch.manual_seed(hp.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -131,6 +158,13 @@ def main(hp: HParams = HParams(), root: str = "data/all_beauty",
     history = train.groupby("user")["item"].agg(set).to_dict()
     rows = evaluation_rows(val, catalog, history)
     print(f"validação: {len(rows)} de {len(val)} interações avaliáveis ({len(rows) / len(val):.1%})")
+    if val_sample and val["user"].nunique() > val_sample:
+        # sorteio sobre todos os usuários da validação, não sobre as linhas avaliáveis:
+        # assim a amostra não muda quando o limiar de "liked" (shrink_k) muda
+        users = np.sort(val["user"].unique())
+        chosen = np.random.default_rng(0).choice(users, size=val_sample, replace=False)
+        rows = rows[rows["user"].isin(chosen)]
+        print(f"amostra da validação: {val_sample} usuários -> {len(rows)} interações avaliadas")
 
     # Referência: popularidade no treino
     pop = torch.tensor([stats.item_count[i] for i in items], dtype=torch.float32)
@@ -148,12 +182,9 @@ def main(hp: HParams = HParams(), root: str = "data/all_beauty",
         print(f"cache do encoder: {len(encoder.cache)} textos em {time.time() - start:.0f}s")
 
     model = build_model(hp, stats, encoder).to(device)
-    loss_fn = ReviewAwareLoss(hp.loss_weights()).to(device)
+    loss_fn = ReviewAwareLoss(hp.loss_weights(), n_levels=rating_levels(train)).to(device)
     params = [p for p in (*model.parameters(), *loss_fn.parameters()) if p.requires_grad]
     optimizer = torch.optim.Adam(params, lr=hp.lr)
-
-    def model_scores(users: list) -> torch.Tensor:
-        return model(builder.build(users, items).to(device), in_batch=True).total
 
     # Laço com early stopping no nDCG@10 da validação
     best, best_metrics, best_state, waited = -1.0, {}, None, 0
@@ -161,7 +192,7 @@ def main(hp: HParams = HParams(), root: str = "data/all_beauty",
         start = time.time()
         terms = train_epoch(model, loss_fn, loader, optimizer, device)
         model.eval()
-        metrics = evaluate(model_scores, rows, catalog, history, eval_chunk)
+        metrics = evaluate(catalog_scorer(model, builder, items, device), rows, catalog, history, eval_chunk)
 
         print(f"\népoca {epoch} ({time.time() - start:.0f}s)")
         print("  perda:", {k: round(v, 4) for k, v in terms.items()})
