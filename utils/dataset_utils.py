@@ -6,7 +6,8 @@ from torch.utils.data import Dataset
 
 
 class RankingTrainDataset(Dataset):
-    def __init__(self, user_item_matrix, df_text, df_full, aspect_probs=None, aspect_mask=None, seed=None):
+    def __init__(self, user_item_matrix, df_text, df_full, aspect_probs=None, aspect_mask=None, seed=None,
+                 max_user_reviews=None, mask_pos_in_input=True):
         """
         aspect_probs, aspect_mask : Optional[np.ndarray]
             Dense, per-user arrays row-aligned by userId (see
@@ -16,6 +17,13 @@ class RankingTrainDataset(Dataset):
             needs them; every other model ignores unknown batch keys, but
             there's no reason to build/carry these arrays when nothing will
             read them.
+        max_user_reviews : keep only each user's last N rows of df_text (in
+            df_text's row order, so sort it by time first). None keeps all,
+            which can OOM for heavy users (thousands of reviews).
+        mask_pos_in_input : zero the sampled positive item in ratings_in.
+            Otherwise the positive is visible in the input during training
+            and the AE learns to copy its input instead of to rank held-out
+            items (at eval time the held-out item is never in the input).
         """
         self.matrix = user_item_matrix
         self.num_items = user_item_matrix.shape[1]
@@ -40,8 +48,16 @@ class RankingTrainDataset(Dataset):
 
         self.user_interactions = df_full.groupby('userId')['itemId'].apply(set).to_dict()
 
-        self.user_text_map = df_text.groupby('userId')
+        self.mask_pos_in_input = mask_pos_in_input
         self.text_cols = [col for col in df_text.columns if str(col).isdigit()]
+        # Precompute one array per user once, instead of get_group() on a
+        # wide dataframe for every sample of every epoch.
+        text_values = df_text[self.text_cols].to_numpy(dtype=np.float32)
+        self.user_text = {}
+        for uid, pos in df_text.groupby('userId').indices.items():
+            if max_user_reviews is not None:
+                pos = pos[-max_user_reviews:]
+            self.user_text[int(uid)] = text_values[pos]
 
     def __len__(self):
         return len(self.user_ids)
@@ -56,17 +72,21 @@ class RankingTrainDataset(Dataset):
         while neg_item in self.user_interactions.get(idx, set()):
             neg_item = self.rng.choice(self.all_items)
 
-        try:
-            u_data = self.user_text_map.get_group(idx)
-            user_text = torch.tensor(u_data[self.text_cols].values, dtype=torch.float32)
-        except KeyError:
+        u_text = self.user_text.get(idx)
+        if u_text is not None:
+            user_text = torch.from_numpy(u_text)
+        else:
             user_text = torch.zeros((1, len(self.text_cols)), dtype=torch.float32)
+
+        ratings_in = torch.from_numpy(self.matrix[idx].toarray()).float().squeeze(0)
+        if self.mask_pos_in_input:
+            ratings_in[pos_item] = 0.0
 
         item = {
             "user_ids": idx,
             "pos_item_id": pos_item,
             "neg_item_id": neg_item,
-            "ratings_in": torch.from_numpy(self.matrix[idx].toarray()).float().squeeze(),
+            "ratings_in": ratings_in,
             "user_text": user_text
         }
 
@@ -105,7 +125,22 @@ def build_interacted_by_user(df_full):
     return df_full.groupby('userId')['itemId'].apply(set).to_dict()
 
 
-def loocv_collate_fn(batch, interacted_by_user, num_items, num_negatives=99):
+def build_fixed_negatives(df_eval, interacted_by_user, num_items, num_negatives=99, seed=0):
+    """Draw the 99 eval negatives once per user, so every epoch and every
+    Optuna trial is scored on the same candidates (otherwise the val metric
+    changes between trials just because the negatives changed)."""
+    rng = np.random.default_rng(seed)
+    all_items = np.arange(num_items)
+    out = {}
+    for u, pos in zip(df_eval["userId"].values, df_eval["itemId"].values):
+        interacted = interacted_by_user.get(int(u), set()) | {int(pos)}
+        candidates = np.setdiff1d(all_items, np.fromiter(interacted, dtype=np.int64))
+        out[int(u)] = rng.choice(candidates, num_negatives,
+                                 replace=len(candidates) < num_negatives)
+    return out
+
+
+def loocv_collate_fn(batch, interacted_by_user, num_items, num_negatives=99, fixed_negatives=None):
     """
     Standardizes batch for ranking: 1 positive (already filtered) + N unseen negatives.
 
@@ -138,6 +173,10 @@ def loocv_collate_fn(batch, interacted_by_user, num_items, num_negatives=99):
     for d in batch:
         u_id = d["user_ids"]
         pos_item = d["pos_item_id"]
+        if fixed_negatives is not None:
+            test_items.append(pos_item)
+            neg_items.append(torch.as_tensor(fixed_negatives[u_id], dtype=torch.long))
+            continue
         # "Unseen" = items the user has NEVER interacted with, excluding the
         # held-out positive itself so it can't also be drawn as a "negative".
         test_items.append(pos_item)
@@ -159,9 +198,12 @@ def loocv_collate_fn(batch, interacted_by_user, num_items, num_negatives=99):
     return res
 
 def create_sparse_matrix(df, num_users, num_items):
-    """Cria matriz esparsa garantindo que ratings sejam float para o AE."""
+    """Cria matriz esparsa garantindo que ratings sejam float para o AE.
+    Repeated (user, item) pairs are averaged; csr_matrix would otherwise sum
+    them (e.g. two 4-star reviews -> an 8 in the input)."""
+    agg = df.groupby(['userId', 'itemId'], as_index=False)['rating'].mean()
     return csr_matrix(
-        (df['rating'].values.astype(np.float32), (df['userId'], df['itemId'])),
+        (agg['rating'].values.astype(np.float32), (agg['userId'], agg['itemId'])),
         shape=(num_users, num_items)
     )
 

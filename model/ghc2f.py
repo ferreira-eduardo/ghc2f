@@ -21,7 +21,7 @@ class GHC2F(GatedHybridCFAutoEncoder):
         self.item_input_dim = self.encoder[0].out_features
         self.name = 'GHC2F'
 
-        self.bottleneck_dim = ae_kwargs['layer_sizes'][-1]
+        self.bottleneck_dim = self.code_dim_cf
 
 
         if self.item_input_dim != self.bottleneck_dim:
@@ -86,7 +86,9 @@ class GHC2F(GatedHybridCFAutoEncoder):
         loss maximizes entropy, i.e. discourages the gate from saturating at
         trivial all-0 / all-1 solutions.
         """
-        if not gate_values:
+        # Only meaningful for sigmoid gates in (0, 1). In "film" mode the
+        # values are unbounded FiLM scales, so the entropy term is skipped.
+        if not gate_values or self.fusion_mode == "film":
             return torch.zeros((), device=self.device)
 
         entropies = []
@@ -102,7 +104,11 @@ class GHC2F(GatedHybridCFAutoEncoder):
 
         loss_bpr = F.softplus(out.neg_scores.squeeze(-1) - out.pos_scores.squeeze(-1)).mean()
 
-        loss_cl = self.contrastive_loss(out.z_fused, out.z_text)
+        if self.contrastive_target == "text":
+            cl_target = out.z_text
+        else:
+            cl_target = out.z_cf.detach() if self.stop_grad_cf else out.z_cf
+        loss_cl = self.contrastive_loss(out.z_fused, cl_target)
 
         # --- gate entropy regularizer ---
         loss_gate = self.gate_entropy_loss(out.gate_values)
@@ -138,15 +144,15 @@ class GHC2F(GatedHybridCFAutoEncoder):
                 batch = {k_: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k_, v in batch.items()}
 
-                out = self.forward(batch)
-
                 pos_items = batch["pos_item_id"].unsqueeze(-1)
                 neg_items = batch["neg_item_id"]
                 target_indices = torch.cat([pos_items, neg_items], dim=1)  # (B, 1+num_neg)
 
-                test_scores = self._score_items(out.z_fused, target_indices)
-                pos_scores = test_scores[:, 0].unsqueeze(1)
-                ranks = (test_scores > pos_scores).sum(dim=1) + 1
+                test_scores = self.forward(batch, item_indices=target_indices).recon
+                pos_scores = test_scores[:, :1]
+                # ties count against the positive, so a collapsed model
+                # (all scores equal) gets HR=0 instead of HR=1
+                ranks = (test_scores[:, 1:] >= pos_scores).sum(dim=1) + 1
                 ranks_cpu = ranks.cpu().numpy()
 
                 hits = (ranks_cpu <= k).astype(float)
