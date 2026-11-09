@@ -1,0 +1,44 @@
+{
+  "dataset": "rotten_tomatoes",
+  "model": "gated_hybrid",
+  "data_path": "datasets/rotten_tomatoes.parquet",
+  "backbone": {
+    "layers": "wide_d1",
+    "nl_type": "selu",
+    "dropout": 0.5981175819560295,
+    "lr": 0.0096899633255532,
+    "tied_weights": true
+  },
+  "loss_kwargs": {},
+  "args": {
+    "datasets": [
+      "imdb",
+      "rotten_tomatoes",
+      "amazon"
+    ],
+    "models": [
+      "gated_hybrid",
+      "ghc2f"
+    ],
+    "folds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "splits_dir": "splits",
+    "hparams_dir": "grid_search/best_hyperparameters",
+    "out_dir": "results/new_ghcf",
+    "data_path": null,
+    "embeddings_path": "results/embeddings/",
+    "epochs": 40,
+    "patience": 5,
+    "batch_size": 256,
+    "eval_batch_size": 256,
+    "num_workers": 0,
+    "max_reviews": 50,
+    "seed": 42,
+    "overwrite": true
+  }
+}

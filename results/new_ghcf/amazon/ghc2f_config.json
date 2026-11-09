@@ -1,0 +1,51 @@
+{
+  "dataset": "amazon",
+  "model": "ghc2f",
+  "data_path": "datasets/amazon.parquet",
+  "backbone": {
+    "layers": "narrow_d3",
+    "nl_type": "selu",
+    "dropout": 0.1011236117372092,
+    "lr": 4.888961905353264e-05,
+    "tied_weights": true
+  },
+  "loss_kwargs": {
+    "contrastive_target": "text",
+    "stop_grad_cf": true,
+    "cl_weight": 0.0494633020940528,
+    "reg_weight": 1.0535344658237818e-06,
+    "gate_entropy_weight": 0.0,
+    "text_gamma": 0.3906566037569667
+  },
+  "args": {
+    "datasets": [
+      "imdb",
+      "rotten_tomatoes",
+      "amazon"
+    ],
+    "models": [
+      "gated_hybrid",
+      "ghc2f"
+    ],
+    "folds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "splits_dir": "splits",
+    "hparams_dir": "grid_search/best_hyperparameters",
+    "out_dir": "results/new_ghcf",
+    "data_path": null,
+    "embeddings_path": "results/embeddings/",
+    "epochs": 40,
+    "patience": 5,
+    "batch_size": 256,
+    "eval_batch_size": 256,
+    "num_workers": 0,
+    "max_reviews": 50,
+    "seed": 42,
+    "overwrite": true
+  }
+}

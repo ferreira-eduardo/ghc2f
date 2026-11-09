@@ -1,0 +1,45 @@
+{
+  "dataset": "imdb",
+  "model": "cf_autoencoder",
+  "data_path": "datasets/imdb.parquet",
+  "backbone": {
+    "layers": "narrow_d1",
+    "nl_type": "selu",
+    "dropout": 0.2524228607236953,
+    "lr": 0.0021703703321202,
+    "tied_weights": true
+  },
+  "loss_kwargs": {},
+  "hparams_from": "ghc2f",
+  "args": {
+    "datasets": [
+      "imdb",
+      "rotten_tomatoes",
+      "amazon"
+    ],
+    "models": [
+      "cf_autoencoder"
+    ],
+    "cf_hparams_from": "ghc2f",
+    "folds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "splits_dir": "splits",
+    "hparams_dir": "grid_search/best_hyperparameters",
+    "out_dir": "results/new_ghcf",
+    "data_path": null,
+    "embeddings_path": "results/embeddings/",
+    "epochs": 40,
+    "patience": 5,
+    "batch_size": 256,
+    "eval_batch_size": 256,
+    "num_workers": 0,
+    "max_reviews": 50,
+    "seed": 42,
+    "overwrite": false
+  }
+}
