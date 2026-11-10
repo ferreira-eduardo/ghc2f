@@ -344,7 +344,7 @@ def parse_args():
     p.add_argument("--is_sample", type=str2bool, default=False)
     p.add_argument("--sample_size", type=int, default=3000)
     p.add_argument("--k_grid", nargs="+", type=int,
-                   default=[10, 15, 20, 25, 30, 40, 50, 60, 75, 100],
+                   default=[10, 15, 20, 25],
                    help="Numbers of topics to try (UMAP is computed once, so extra K values "
                         "only cost K-Means + c-TF-IDF + coherence).")
     p.add_argument("--k_range", nargs=3, type=int, default=None, metavar=("START", "STOP", "STEP"),

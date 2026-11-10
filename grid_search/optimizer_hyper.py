@@ -470,6 +470,8 @@ if __name__ == "__main__":
     parser.add_argument("--stage1_frac", type=float, default=STAGE1_SAMPLE_FRAC)
     parser.add_argument("--stage2_frac", type=float, default=None)
     parser.add_argument("--epochs", type=int, default=STAGE1_EPOCHS, help="Epochs per Stage 1/2 trial")
+    parser.add_argument("--stage2_epochs", type=int, default=None,
+                        help="Epochs per Stage 2 trial. Default: --epochs")
     parser.add_argument("--stage3_epochs", type=int, default=STAGE3_EPOCHS)
     parser.add_argument("--skip_stage3", action="store_true", help="Skip the full-data confirmation stage")
     parser.add_argument("--out_dir", type=str, default="grid_search/best_hyperparameters")
@@ -528,7 +530,8 @@ if __name__ == "__main__":
         print(f"\n=== Stage 2: loss-weight search for {args.dataset} ({stage2_frac:.0%}) ===")
         opt._resample(stage2_frac)
         stage2_study, best_loss_weights = opt.run_loss_weight_study(
-            fixed_backbone=best_backbone, n_trials=args.stage2_trials, num_epochs=args.epochs,
+            fixed_backbone=best_backbone, n_trials=args.stage2_trials,
+            num_epochs=args.stage2_epochs or args.epochs,
             storage=storage, study_name=f"{study_prefix}_stage2", restart=args.restart,
         )
         ghc2f_kwargs.update(best_loss_weights)
