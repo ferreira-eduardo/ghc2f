@@ -36,6 +36,7 @@ from torch.utils.data import DataLoader
 
 from grid_search.optimizer_hyper import (MODEL_REGISTRY, STAGE1_GHC2F_DEFAULTS, STAGE3_EPOCHS, MAX_REVIEWS,
                                          build_layer_options, resolve_data_path, resolve_embeddings_path)
+from model.cf_autoencoder import CFAutoEncoder
 from model.ghc2f import GHC2F
 from utils.catalog_eval import CatalogScorer, to_protocol_frame, user_text_arrays
 from utils.dataset_utils import RankingTrainDataset, train_collate_fn, create_sparse_matrix
@@ -43,9 +44,14 @@ from utils.irev_protocol import ITEM_CHUNK, SELECTION, Protocol
 from utils.train_model import train_model
 from utils.utils import prepare_inputs, EarlyStoppingRanking
 
-DATASETS = ["imdb", "rotten_tomatoes", "amazon"]
-MODELS = ["gated_hybrid", "ghc2f", "AE_BPR"]
-FOLDS = [0, 1, 2, 3, 4]
+DATASETS = ["amazon"]
+MODELS = ["ghc2f"]
+# Text-free AE_BPR has no tuned CSV of its own: it reuses the backbone of a text model
+# (only BACKBONE_KEYS are read; the text/loss hyperparameters are ignored).
+TEXTLESS_MODELS = {"AE_BPR": CFAutoEncoder}
+HPARAM_SOURCES = ("gated_hybrid", "ghc2f")
+MODEL_CLASSES = {**MODEL_REGISTRY, **TEXTLESS_MODELS}
+FOLDS = [3, 4]
 GHC2F_LOSS_KEYS = ("text_gamma", "contrastive_target", "stop_grad_cf", "cl_weight", "reg_weight")
 BACKBONE_KEYS = ("layers", "nl_type", "dropout", "lr", "tied_weights")
 INFO_COLS = ("fold", "dataset", "model", "text_features", "epochs_run", "train_time_s")
@@ -63,14 +69,15 @@ def _py(v):
     return v
 
 
-def load_best_params(hparams_dir, dataset, model_name):
-    path = os.path.join(hparams_dir, f"{dataset}_{model_name}.csv")
+def load_best_params(hparams_dir, dataset, model_name, textless_source="gated_hybrid"):
+    source = textless_source if model_name in TEXTLESS_MODELS else model_name
+    path = os.path.join(hparams_dir, f"{dataset}_{source}.csv")
     if not os.path.exists(path):
         return None, path
     row = pd.read_csv(path).iloc[0].to_dict()
     params = {k: _py(row[k]) for k in BACKBONE_KEYS}
     loss_kwargs = {}
-    if MODEL_REGISTRY[model_name] is GHC2F:
+    if MODEL_CLASSES[model_name] is GHC2F:
         loss_kwargs = dict(STAGE1_GHC2F_DEFAULTS)
         loss_kwargs.update({k: _py(row[k]) for k in GHC2F_LOSS_KEYS if k in row and pd.notna(row[k])})
     return (params, loss_kwargs), path
@@ -145,13 +152,16 @@ def run_fold(args, model_name, params, loss_kwargs, df, split, df_text, text_col
     item_ids, item_text, item_mask = prepare_inputs(text_train, "itemId", text_cols, max_reviews=args.max_reviews)
 
     layer_sizes = build_layer_options(total_items)[params["layers"]](total_items)
-    model = MODEL_REGISTRY[model_name](
-        layer_sizes=layer_sizes, num_users=total_users, num_items=total_items,
-        text_dim=len(text_cols), text_latent_dim=64,
-        nl_type=params["nl_type"], dp_drop_prob=params["dropout"], learn_rate=params["lr"],
-        tied_weights=params["tied_weights"], **loss_kwargs,
-    ).to(device)
-    model.set_item_corpus(item_ids.to(device), item_text.to(device), item_mask.to(device))
+    backbone = dict(layer_sizes=layer_sizes, nl_type=params["nl_type"], dp_drop_prob=params["dropout"],
+                    learn_rate=params["lr"], tied_weights=params["tied_weights"])
+    if model_name in TEXTLESS_MODELS:
+        model = TEXTLESS_MODELS[model_name](**backbone).to(device)
+    else:
+        model = MODEL_CLASSES[model_name](
+            num_users=total_users, num_items=total_items,
+            text_dim=len(text_cols), text_latent_dim=64, **backbone, **loss_kwargs,
+        ).to(device)
+        model.set_item_corpus(item_ids.to(device), item_text.to(device), item_mask.to(device))
 
     train_dataset = RankingTrainDataset(train_matrix, text_train, train, seed=seed,
                                         max_user_reviews=args.max_reviews, mask_pos_in_input=True)
@@ -217,10 +227,15 @@ def summarize(df_folds):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--datasets", nargs="+", default=DATASETS)
-    p.add_argument("--models", nargs="+", default=MODELS, choices=MODELS)
+    p.add_argument("--models", nargs="+", default=MODELS, choices=sorted(MODEL_CLASSES))
     p.add_argument("--folds", nargs="+", type=int, default=FOLDS)
     p.add_argument("--splits_dir", default="splits")
     p.add_argument("--hparams_dir", default="grid_search/best_hyperparameters")
+    p.add_argument("--textless_hparams_from", default="gated_hybrid", choices=HPARAM_SOURCES,
+                   help="Which tuned text model's backbone (layers/nl_type/dropout/lr/tied_weights) "
+                        "the text-free models (AE_BPR) reuse")
+    p.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE",
+                   help="Override tuned hyperparameters, e.g. --set cl_weight=0 (ablations/diagnostics)")
     p.add_argument("--out_dir", default="results/new_ghc2f")
     p.add_argument("--data_path", default=None, help="Default: same lookup as optimizer_hyper.py")
     p.add_argument("--embeddings_path", default=None,
@@ -238,16 +253,34 @@ def main():
     p.add_argument("--overwrite", action="store_true", help="Re-run folds that already have results")
     args = p.parse_args()
 
+    overrides = {}
+    for kv in args.set:
+        k, v = kv.split("=", 1)
+        if k not in BACKBONE_KEYS + GHC2F_LOSS_KEYS:
+            raise SystemExit(f"--set: unknown key {k!r}; allowed {BACKBONE_KEYS + GHC2F_LOSS_KEYS}")
+        try:
+            v = float(v) if any(c in v for c in ".eE") else int(v)
+        except ValueError:
+            v = _py(v)
+        overrides[k] = v
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     for dataset in args.datasets:
         todo = {}
         for m in args.models:
-            best, path = load_best_params(args.hparams_dir, dataset, m)
+            best, path = load_best_params(args.hparams_dir, dataset, m, args.textless_hparams_from)
             if best is None:
                 print(f"[skip] {dataset}/{m}: no tuned hyperparameters at {path}")
             else:
+                params, loss_kwargs = best
+                for k, v in overrides.items():
+                    target = params if k in BACKBONE_KEYS else loss_kwargs
+                    if target is loss_kwargs and MODEL_CLASSES[m] is not GHC2F:
+                        continue
+                    target[k] = v
                 todo[m] = best
+                print(f"[hparams] {dataset}/{m}: {path}")
         if not todo:
             continue
         missing = [f for f in (os.path.join(args.splits_dir, f"{dataset}_fold{k}.csv") for k in args.folds)
@@ -283,7 +316,9 @@ def main():
             with open(os.path.join(out_dir, f"{model_name}_config.json"), "w") as f:
                 json.dump({"dataset": dataset, "model": model_name, "data_path": data_path,
                            "protocol": "irev_full_catalog", "selection": SELECTION,
-                           "backbone": params, "loss_kwargs": loss_kwargs,
+                           "backbone": params, "loss_kwargs": loss_kwargs, "overrides": overrides,
+                           "hparams_from": (args.textless_hparams_from if model_name in TEXTLESS_MODELS
+                                            else model_name),
                            "args": vars(args)}, f, indent=2, default=str)
 
             for fold in args.folds:

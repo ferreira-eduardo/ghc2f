@@ -19,27 +19,24 @@
     "gate_entropy_weight": 0.0,
     "text_gamma": 0.4530727617533713
   },
+  "overrides": {},
+  "hparams_from": "ghc2f",
   "args": {
     "datasets": [
-      "imdb",
-      "rotten_tomatoes",
       "amazon"
     ],
     "models": [
-      "gated_hybrid",
-      "ghc2f",
-      "AE_BPR"
+      "ghc2f"
     ],
     "folds": [
-      0,
-      1,
-      2,
       3,
       4
     ],
     "splits_dir": "splits",
     "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "textless_hparams_from": "gated_hybrid",
+    "set": [],
+    "out_dir": "results/new_ghc2f",
     "data_path": null,
     "embeddings_path": null,
     "epochs": 30,
