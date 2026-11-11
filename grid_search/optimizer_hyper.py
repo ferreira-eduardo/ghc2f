@@ -15,8 +15,9 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from utils.utils import prepare_inputs, EarlyStoppingRanking
-from utils.dataset_utils import (RankingTrainDataset, train_collate_fn, create_sparse_matrix,
-                                 loocv_collate_fn, build_interacted_by_user, build_fixed_negatives)
+from utils.dataset_utils import RankingTrainDataset, train_collate_fn, create_sparse_matrix
+from utils.catalog_eval import CatalogScorer, to_protocol_frame
+from utils.irev_protocol import ITEM_CHUNK, SELECTION, Protocol, accuracy, rank_all
 
 from model.ghc2f import GHC2F
 from model.cf_autoencoder import CFAutoEncoder
@@ -75,11 +76,19 @@ STAGE1_GHC2F_DEFAULTS = dict(
     gate_entropy_weight=0.0,
 )
 
-STAGE1_EPOCHS = 15
-STAGE3_EPOCHS = 40  # full-data confirmation gets a real training budget
+STAGE1_EPOCHS = 30
+STAGE3_EPOCHS = 30  # full-data confirmation gets a real training budget
 STAGE3_TOP_K = 3    # re-confirm top-K stage-1 trials on 100% data
 STAGE1_SAMPLE_FRAC = 0.5
 MAX_REVIEWS = 50    # per-user / per-item review cap for the text profilers
+
+# Validation follows the iRev baselines' protocol (utils/irev_protocol.py): full train
+# catalog, train history excluded, per-user positive threshold, graded nDCG@10 as the
+# objective. Stored in each study and appended to the study names so trials scored with
+# the old 99-sampled-negatives HR@10 are never mixed in.
+PROTOCOL_TAG = f"irev_full_catalog_{SELECTION}"
+STUDY_SUFFIX = "irev"
+VAL_COL = f"full_data_val_{SELECTION}"
 
 
 # ---------------------------------------------------------------------------
@@ -111,17 +120,21 @@ def resolve_embeddings_path(dataset_name, embeddings_path=None):
 class GatedAEOptimizer:
     def __init__(self, dataset_name, device, data_path, embeddings_path, split_path=None, fold=0,
                  sample_frac=STAGE1_SAMPLE_FRAC, random_state=42, batch_size=256, num_workers=0,
-                 max_reviews=MAX_REVIEWS):
+                 max_reviews=MAX_REVIEWS, eval_batch_size=512, eval_chunk=ITEM_CHUNK):
         self.dataset_name = dataset_name
         self.device = device
         self.random_state = random_state
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.max_reviews = max_reviews
+        self.eval_batch_size = eval_batch_size
+        self.eval_chunk = eval_chunk
 
         print(f"Loading {data_path} ...")
         raw = pd.read_parquet(data_path) if data_path.endswith(".parquet") else pd.read_csv(data_path)
         raw = raw.reset_index(drop=True)
+        if "rating" not in raw.columns:
+            raise ValueError(f"{data_path} has no rating column; the iRev protocol needs the original ratings")
         cols = [c for c in ("userId", "itemId", "rating", "timestamp") if c in raw.columns]
         self.full_df = raw[cols].copy()
         del raw
@@ -143,6 +156,13 @@ class GatedAEOptimizer:
             print(f"No split file; computing LOO fold {fold} on the fly")
             self.full_df["split"] = loo_labels(self.full_df, fold)
         print(self.full_df["split"].value_counts().to_dict())
+
+        # Protocol on the FULL fold (thresholds, catalog, histories), as in run_experiment.py.
+        # Sampling below only picks which val users are scored, so the catalog -- and so
+        # the difficulty of the ranking -- is the same at every sample fraction.
+        self.protocol = Protocol(*(to_protocol_frame(self.full_df[self.full_df["split"] == s])
+                                   for s in ("train", "val", "test")))
+        print(f"Protocol: {self.protocol.describe()}")
 
         # --- review embeddings, row-aligned with full_df ---
         print(f"Loading embeddings {embeddings_path} ...")
@@ -182,15 +202,11 @@ class GatedAEOptimizer:
             return self._fold_cache
 
         train = self.df[self.df["split"] == "train"]
-        val = self.df[self.df["split"] == "val"]
 
-        # Re-reviews: the val item is already in that user's train input, so
-        # the AE scores it from the input itself. Not a ranking task -> drop.
-        train_pairs = pd.MultiIndex.from_frame(train[["userId", "itemId"]])
-        rereview = pd.MultiIndex.from_frame(val[["userId", "itemId"]]).isin(train_pairs)
-        if rereview.any():
-            print(f"Dropping {int(rereview.sum())} val rows whose item is already in the user's train history")
-        val = val[~rereview]
+        # Val rows of the sampled users that the protocol can evaluate (item in the
+        # train catalog, not a re-review of the user's train history).
+        val_rows = self.protocol.rows["val"]
+        val_rows = val_rows[val_rows["user"].isin(train["userId"].unique())]
 
         train_matrix = create_sparse_matrix(train, self.TOTAL_USERS, self.TOTAL_ITEMS)
 
@@ -199,10 +215,6 @@ class GatedAEOptimizer:
         order = train.sort_values(["timestamp", "review_idx"], kind="mergesort").index \
             if "timestamp" in train.columns else train.index
         df_text_seen = self.df_text.loc[order]
-
-        interacted_by_user = build_interacted_by_user(train)
-        fixed_negatives = build_fixed_negatives(val, interacted_by_user, self.TOTAL_ITEMS,
-                                                seed=self.random_state)
 
         # Item corpus from train reviews only (previously it used every review of
         # every train item, including the held-out val/test reviews).
@@ -213,19 +225,16 @@ class GatedAEOptimizer:
 
         train_ds = RankingTrainDataset(train_matrix, df_text_seen, train, seed=self.random_state,
                                        max_user_reviews=self.max_reviews, mask_pos_in_input=True)
-        val_ds = RankingTrainDataset(train_matrix, df_text_seen, val,
-                                     max_user_reviews=self.max_reviews, mask_pos_in_input=False)
 
         self._fold_cache = dict(
-            train_ds=train_ds, val_ds=val_ds,
-            interacted_by_user=interacted_by_user, fixed_negatives=fixed_negatives,
+            train_ds=train_ds, train_matrix=train_matrix, val_rows=val_rows,
             item_ids=item_ids, item_text=item_text, item_mask=item_mask,
         )
-        print(f"Fold cache: {len(train_ds):,} train users, {len(val_ds):,} val users, "
-              f"{len(item_ids):,} corpus items")
+        print(f"Fold cache: {len(train_ds):,} train users, {len(val_rows):,} val rows "
+              f"({int(val_rows['liked'].sum()):,} positive), {len(item_ids):,} corpus items")
         return self._fold_cache
 
-    def _build_model_and_loaders(self, model_cls, layer_sizes, nl_type, dropout, lr,
+    def _build_model_and_loader(self, model_cls, layer_sizes, nl_type, dropout, lr,
                                  tied_weights, extra_kwargs):
         cache = self._get_fold_cache()
 
@@ -252,39 +261,49 @@ class GatedAEOptimizer:
             cache["train_ds"], batch_size=self.batch_size, shuffle=True, collate_fn=train_collate_fn,
             num_workers=self.num_workers, persistent_workers=persistent,
         )
-        interacted_by_user, fixed_negatives = cache["interacted_by_user"], cache["fixed_negatives"]
-        val_loader = DataLoader(
-            cache["val_ds"], batch_size=self.batch_size, shuffle=False,
-            collate_fn=lambda b: loocv_collate_fn(b, interacted_by_user, self.TOTAL_ITEMS,
-                                                  fixed_negatives=fixed_negatives),
-            num_workers=self.num_workers, persistent_workers=persistent,
-        )
-        return model, train_loader, val_loader
+        return model, train_loader
 
-    def _run_and_cleanup(self, model, train_loader, val_loader, num_epochs=STAGE1_EPOCHS, trial=None):
-        """Trains the model. With `trial`, reports the running best val hit
-        rate after every epoch so the pruner can stop bad trials early."""
+    def _validator(self, model):
+        """validate(model) -> full-catalog val nDCG@10 of the sampled users."""
+        cache = self._get_fold_cache()
+        scorer = CatalogScorer(model, cache["train_matrix"], cache["train_ds"].user_text, self.text_dim,
+                               self.protocol.items, self.eval_batch_size)
+
+        def validate(_model):
+            ranks = rank_all(scorer, cache["val_rows"], self.protocol.catalog,
+                             self.protocol.history["val"], self.eval_chunk)
+            metrics = accuracy(ranks, self.protocol.top_rating)
+            print(f"  val ndcg@10={metrics['ndcg@10']:.4f}  recall@10={metrics['recall@10']:.4f}  "
+                  f"mrr={metrics['mrr']:.4f}")
+            return metrics[SELECTION]
+
+        return validate
+
+    def _run_and_cleanup(self, model, train_loader, num_epochs=STAGE1_EPOCHS, trial=None):
+        """Trains the model. With `trial`, reports the running best val nDCG@10
+        after every epoch so the pruner can stop bad trials early."""
         early_stopping = EarlyStoppingRanking(patience=5, verbose=False)
+        validate = self._validator(model)
         callback = None
 
         if trial is not None:
             state = {"best": -1.0}
 
-            def callback(epoch, val_hit_rate, **_):
-                state["best"] = max(state["best"], val_hit_rate)
+            def callback(epoch, val_metric, **_):
+                state["best"] = max(state["best"], val_metric)
                 trial.report(state["best"], step=epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
         try:
-            best_val_hit_rate, _ = train_model(model, num_epochs, train_loader, val_loader,
-                                               early_stopping, epoch_callback=callback)
+            best_val, _ = train_model(model, num_epochs, train_loader, None, early_stopping,
+                                      epoch_callback=callback, validate=validate)
         finally:
-            del model, early_stopping
+            del model, early_stopping, validate
             gc.collect()
             torch.cuda.empty_cache()
 
-        return best_val_hit_rate
+        return best_val
 
     # ------------------------------------------------------------------
     # Stage 1: backbone / optimizer hyperparameters (all three models)
@@ -299,16 +318,17 @@ class GatedAEOptimizer:
         layer_sizes = self.layer_options[layer_option](self.TOTAL_ITEMS)
         extra_kwargs = STAGE1_GHC2F_DEFAULTS if model_cls is GHC2F else {}
 
-        model, train_loader, val_loader = self._build_model_and_loaders(
+        model, train_loader = self._build_model_and_loader(
             model_cls, layer_sizes, nl_type, dropout, lr, tied_weights, extra_kwargs
         )
-        return self._run_and_cleanup(model, train_loader, val_loader, num_epochs=num_epochs, trial=trial)
+        return self._run_and_cleanup(model, train_loader, num_epochs=num_epochs, trial=trial)
 
     def run_backbone_study(self, model_cls, n_trials=60, num_epochs=STAGE1_EPOCHS,
                            storage=None, study_name="stage1", restart=False):
         study = create_or_resume_study(storage, study_name, self.random_state, restart,
                                        expected_attrs={"sample_frac": self.sample_frac,
-                                                       "epochs": num_epochs})
+                                                       "epochs": num_epochs,
+                                                       "protocol": PROTOCOL_TAG})
         study.optimize(lambda trial: self.objective_backbone(trial, model_cls, num_epochs),
                        n_trials=remaining_trials(study, n_trials))
         print("\n[Stage 1] Best backbone hyperparameters:")
@@ -331,11 +351,11 @@ class GatedAEOptimizer:
         )
         layer_sizes = self.layer_options[fixed_backbone["layers"]](self.TOTAL_ITEMS)
 
-        model, train_loader, val_loader = self._build_model_and_loaders(
+        model, train_loader = self._build_model_and_loader(
             GHC2F, layer_sizes, fixed_backbone["nl_type"], fixed_backbone["dropout"],
             fixed_backbone["lr"], fixed_backbone["tied_weights"], ghc2f_kwargs,
         )
-        return self._run_and_cleanup(model, train_loader, val_loader, num_epochs=num_epochs, trial=trial)
+        return self._run_and_cleanup(model, train_loader, num_epochs=num_epochs, trial=trial)
 
     def run_loss_weight_study(self, fixed_backbone, n_trials=50, num_epochs=STAGE1_EPOCHS,
                               storage=None, study_name="stage2", restart=False):
@@ -344,6 +364,7 @@ class GatedAEOptimizer:
         study = create_or_resume_study(storage, study_name, self.random_state, restart,
                                        expected_attrs={"sample_frac": self.sample_frac,
                                                        "epochs": num_epochs,
+                                                       "protocol": PROTOCOL_TAG,
                                                        "fixed_backbone": dict(fixed_backbone)},
                                        restart_on_mismatch=True)
         study.optimize(lambda trial: self.objective_loss_weights(trial, fixed_backbone, num_epochs),
@@ -363,16 +384,16 @@ class GatedAEOptimizer:
         for i, params in enumerate(candidate_params_list):
             print(f"\n[Stage 3] Confirming candidate {i + 1}/{len(candidate_params_list)} on 100% data: {params}")
             layer_sizes = self.layer_options[params["layers"]](self.TOTAL_ITEMS)
-            model, train_loader, val_loader = self._build_model_and_loaders(
+            model, train_loader = self._build_model_and_loader(
                 model_cls, layer_sizes, params["nl_type"], params["dropout"], params["lr"],
                 params["tied_weights"], extra_kwargs,
             )
-            hit_rate = self._run_and_cleanup(model, train_loader, val_loader, num_epochs=num_epochs)
-            results.append({**params, "full_data_val_hit_rate": hit_rate})
+            val_metric = self._run_and_cleanup(model, train_loader, num_epochs=num_epochs)
+            results.append({**params, VAL_COL: val_metric})
 
-        results_df = pd.DataFrame(results).sort_values("full_data_val_hit_rate", ascending=False)
+        results_df = pd.DataFrame(results).sort_values(VAL_COL, ascending=False)
         print("\n[Stage 3] Full-data confirmation ranking:")
-        print(results_df[["layers", "tied_weights", "full_data_val_hit_rate"]])
+        print(results_df[["layers", "tied_weights", VAL_COL]])
         return results_df
 
 
@@ -487,6 +508,10 @@ if __name__ == "__main__":
                         help="Delete this run's existing studies and start from scratch")
     parser.add_argument("--max_reviews", type=int, default=MAX_REVIEWS,
                         help="Cap on reviews per user / per item fed to the text profilers")
+    parser.add_argument("--eval_batch_size", type=int, default=512,
+                        help="Users per model forward at validation")
+    parser.add_argument("--eval_chunk", type=int, default=ITEM_CHUNK,
+                        help="Val rows ranked per pass (each holds a rows x catalog score matrix on the GPU)")
     args = parser.parse_args()
 
     model_cls = MODEL_REGISTRY[args.model]
@@ -494,6 +519,7 @@ if __name__ == "__main__":
 
     storage = None if args.storage.lower() == "none" else make_storage(args.storage)
     study_prefix = args.study_prefix or f"{args.dataset}_{args.model}_fold{args.fold}"
+    study_prefix = f"{study_prefix}_{STUDY_SUFFIX}"  # keeps old HR@10 studies apart
 
     split_path = os.path.join(args.splits_dir, f"{args.dataset}_fold{args.fold}.csv")
     split_path = split_path if os.path.exists(split_path) else None
@@ -504,6 +530,7 @@ if __name__ == "__main__":
         embeddings_path=resolve_embeddings_path(args.dataset, args.embeddings_path),
         split_path=split_path, fold=args.fold, sample_frac=args.stage1_frac,
         batch_size=args.batch_size, num_workers=args.num_workers, max_reviews=args.max_reviews,
+        eval_batch_size=args.eval_batch_size, eval_chunk=args.eval_chunk,
     )
 
     # --- Stage 1: backbone search ---
@@ -517,7 +544,7 @@ if __name__ == "__main__":
     combined_params = dict(best_backbone)
     combined_params.update(dataset=args.dataset, model=args.model, fold=args.fold,
                            split_file=split_path or "on_the_fly",
-                           stage1_sample_frac=args.stage1_frac)
+                           stage1_sample_frac=args.stage1_frac, protocol=PROTOCOL_TAG)
 
     os.makedirs(args.out_dir, exist_ok=True)
     prefix = os.path.join(args.out_dir, f"{args.dataset}_{args.model}")
@@ -551,7 +578,7 @@ if __name__ == "__main__":
         confirmed_best = confirmation_df.iloc[0].to_dict()
         for key in ("layers", "tied_weights", "nl_type", "dropout", "lr"):
             combined_params[key] = confirmed_best[key]
-        combined_params["full_data_val_hit_rate"] = confirmed_best["full_data_val_hit_rate"]
+        combined_params[VAL_COL] = confirmed_best[VAL_COL]
 
     out_path = f"{prefix}.csv"
     pd.DataFrame([combined_params]).to_csv(out_path, index=False)

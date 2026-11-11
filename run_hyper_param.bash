@@ -15,10 +15,20 @@ FOLDS="0"
 
 STORAGE="sqlite:///optuna.db"
 
-STAGE1_TRIALS=60
-STAGE2_TRIALS=50
+# Flat folder with {dataset}_{model}.csv, the layout run_experiment.py --hparams_dir reads.
+# Separate from the old HR@10 results in grid_search/best_hyperparameters/topics/{dataset}/fold0/.
+HPARAMS_DIR="grid_search/best_hyperparameters/topics_irev"
+
+# One parameter file per dataset/model, shared by all 5 final folds -> tune on a single fold.
+if [[ $(wc -w <<< "$FOLDS") -ne 1 ]]; then
+  echo "FOLDS must be a single fold (got: $FOLDS); a second fold would overwrite ${HPARAMS_DIR}" >&2
+  exit 1
+fi
+
+STAGE1_TRIALS=30
+STAGE2_TRIALS=30
 EPOCHS=30          # per Stage 1/2 trial
-STAGE3_EPOCHS=40
+STAGE3_EPOCHS=30
 BATCH_SIZE=256
 
 # Check every input before starting, so a missing fold doesn't fail hours in.
@@ -32,13 +42,12 @@ done
 
 for DATASET in $DATASETS; do
   TOPICS_DIR="results/topics/${DATASET}"
-  OUT_ROOT="grid_search/best_hyperparameters/topics/${DATASET}"
   LOG_DIR="logs/topics/${DATASET}"
   mkdir -p "$LOG_DIR"
 
   for fold in $FOLDS; do
     for model in $MODELS; do
-      out_dir="${OUT_ROOT}/fold${fold}"
+      out_dir="${HPARAMS_DIR}"
       log="${LOG_DIR}/${model}_fold${fold}.log"
       mkdir -p "$out_dir"
 
@@ -63,4 +72,7 @@ for DATASET in $DATASETS; do
   done
 done
 
-echo "Done. Best hyperparameters per fold: grid_search/best_hyperparameters/topics/{dataset}/fold*/{dataset}_{model}.csv"
+echo "Done. Best hyperparameters: ${HPARAMS_DIR}/{dataset}_{model}.csv"
+echo "Final runs:"
+echo "  uv run python run_experiment.py --datasets ${DATASETS} --hparams_dir ${HPARAMS_DIR} \\"
+echo "    --embeddings_path 'results/topics/{dataset}/fold{fold}/review_topic_dist.npy'"

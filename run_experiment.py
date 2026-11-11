@@ -1,12 +1,20 @@
-"""Final 5-fold experiment with the tuned hyperparameters.
+"""Final 5-fold experiment with the tuned hyperparameters, under the iRev baselines' protocol.
 
 For every dataset / model / fold:
   * split      : splits/{dataset}_fold{k}.csv            (utils/leave_one_out_cv.py)
   * params     : grid_search/best_hyperparameters/{dataset}_{model}.csv
-  * train      : train split, early stopping on val HR@10 (same 99 fixed negatives every epoch)
-  * test       : input = train + val history, 1 held-out test item vs 99 fixed unseen negatives
-  * metrics    : HR@{3,5,10,15}, NDCG@{3,5,10,15}, MRR
-  * output     : results/new_ghcf/{dataset}/
+  * protocol   : utils/irev_protocol.py (same code as the iRev baselines)
+      - positive = rating >= per-user threshold (train mean shrunk to the global mean,
+        clipped to [0.6, 0.8] x max rating), computed on train only
+      - ranking against the whole train catalog, user history excluded
+        (train for val, train + val for test), ties at their mean position
+      - graded nDCG@k over every held-out row (gain = rating / max rating);
+        recall@k, MRR and beyond-accuracy over the positive rows only
+  * train      : train split, early stopping on full-catalog val nDCG@10
+  * test       : input = train + val history, ranked against the whole catalog
+  * metrics    : nDCG / recall @ {3,5,10,15,20}, MRR, coverage, gini, entropy, ARP, APLT,
+                 novelty @10, nDCG@10 by user activity and by head/tail target
+  * output     : results/old_ghcf/{dataset}/
 
 Model construction, layer grid, text inputs and review caps are the same as in
 grid_search/optimizer_hyper.py, so the final runs match what was tuned.
@@ -29,17 +37,18 @@ from torch.utils.data import DataLoader
 from grid_search.optimizer_hyper import (MODEL_REGISTRY, STAGE1_GHC2F_DEFAULTS, STAGE3_EPOCHS, MAX_REVIEWS,
                                          build_layer_options, resolve_data_path, resolve_embeddings_path)
 from model.ghc2f import GHC2F
-from utils.dataset_utils import (RankingTrainDataset, train_collate_fn, loocv_collate_fn, create_sparse_matrix,
-                                 build_interacted_by_user, build_fixed_negatives)
+from utils.catalog_eval import CatalogScorer, to_protocol_frame, user_text_arrays
+from utils.dataset_utils import RankingTrainDataset, train_collate_fn, create_sparse_matrix
+from utils.irev_protocol import ITEM_CHUNK, SELECTION, Protocol
 from utils.train_model import train_model
 from utils.utils import prepare_inputs, EarlyStoppingRanking
 
 DATASETS = ["imdb", "rotten_tomatoes", "amazon"]
-MODELS = ["gated_hybrid", "ghc2f"]
+MODELS = ["gated_hybrid", "ghc2f", "AE_BPR"]
 FOLDS = [0, 1, 2, 3, 4]
-KS = [3, 5, 10, 15]
 GHC2F_LOSS_KEYS = ("text_gamma", "contrastive_target", "stop_grad_cf", "cl_weight", "reg_weight")
 BACKBONE_KEYS = ("layers", "nl_type", "dropout", "lr", "tied_weights")
+INFO_COLS = ("fold", "dataset", "model", "text_features", "epochs_run", "train_time_s")
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +81,8 @@ def load_dataset(dataset, data_path=None):
     print(f"Loading {path} ...")
     raw = pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
     raw = raw.reset_index(drop=True)
+    if "rating" not in raw.columns:
+        raise ValueError(f"{path} has no rating column; the iRev protocol needs the original ratings")
     cols = [c for c in ("userId", "itemId", "rating", "timestamp") if c in raw.columns]
     df = raw[cols].copy()
     del raw
@@ -102,50 +113,11 @@ def load_text(df, emb_path):
     return df_text, text_cols
 
 
-def drop_rereviews(history, eval_df, what):
-    """An eval item already in the user's input history is not a ranking task."""
-    seen = pd.MultiIndex.from_frame(history[["userId", "itemId"]])
-    mask = pd.MultiIndex.from_frame(eval_df[["userId", "itemId"]]).isin(seen)
-    if mask.any():
-        print(f"  Dropping {int(mask.sum())} {what} rows whose item is already in the user's history")
-    return eval_df[~mask]
-
-
 def text_seen(df_text, history):
     """Reviews of `history` only, oldest -> newest (the per-user cap keeps the latest)."""
     order = (history.sort_values(["timestamp", "review_idx"], kind="mergesort").index
              if "timestamp" in history.columns else history.index)
     return df_text.loc[order]
-
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-@torch.no_grad()
-def evaluate_ranking(model, loader, ks=KS):
-    """Rank of the held-out item among [pos + 99 negatives]; ties count against it."""
-    model.eval()
-    user_ids, pos_ids, ranks = [], [], []
-    for batch in loader:
-        batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-        candidates = torch.cat([batch["pos_item_id"].unsqueeze(-1), batch["neg_item_id"]], dim=1)
-        scores = model(batch, item_indices=candidates).recon
-        r = (scores[:, 1:] >= scores[:, :1]).sum(dim=1) + 1
-        ranks.append(r.cpu().numpy())
-        user_ids.append(batch["user_ids"].cpu().numpy())
-        pos_ids.append(batch["pos_item_id"].cpu().numpy())
-
-    ranks = np.concatenate(ranks).astype(np.float64)
-    metrics = {}
-    for k in ks:
-        metrics[f"HR@{k}"] = float(np.mean(ranks <= k))
-    for k in ks:
-        metrics[f"NDCG@{k}"] = float(np.mean(np.where(ranks <= k, 1.0 / np.log2(ranks + 1), 0.0)))
-    metrics["MRR"] = float(np.mean(1.0 / ranks))
-    metrics["n_users"] = int(len(ranks))
-    per_user = pd.DataFrame({"userId": np.concatenate(user_ids), "itemId": np.concatenate(pos_ids),
-                             "rank": ranks.astype(int)})
-    return metrics, per_user
 
 
 # ---------------------------------------------------------------------------
@@ -160,24 +132,16 @@ def run_fold(args, model_name, params, loss_kwargs, df, split, df_text, text_col
     total_users = int(df.userId.max() + 1)
 
     train = df[split == "train"]
-    val = drop_rereviews(train, df[split == "val"], "val")
-    history = pd.concat([train, df[split == "val"]])
-    test = drop_rereviews(history, df[split == "test"], "test")
-    if args.only_relevant_test:
-        if "rating" not in df.columns:
-            raise ValueError("--only_relevant_test needs a rating column")
-        stats = train.groupby("userId")["rating"].agg(["mean", "std"])
-        std = stats["std"].replace(0, 1.0).fillna(1.0)
-        z = (test["rating"].values - stats["mean"].reindex(test["userId"]).values) / std.reindex(test["userId"]).values
-        test = test[z > 0]
-    print(f"  train={len(train):,}  val users={len(val):,}  test users={len(test):,}")
+    val = df[split == "val"]
+    test = df[split == "test"]
+    history = pd.concat([train, val])
 
-    # --- train / val (identical to the tuning setup) ---
+    protocol = Protocol(*(to_protocol_frame(x) for x in (train, val, test)))
+    print(f"  train={len(train):,}  {protocol.describe()}")
+
+    # --- train ---
     train_matrix = create_sparse_matrix(train, total_users, total_items)
     text_train = text_seen(df_text, train)
-    inter_train = build_interacted_by_user(train)
-    val_negs = build_fixed_negatives(val, inter_train, total_items, seed=seed)
-
     item_ids, item_text, item_mask = prepare_inputs(text_train, "itemId", text_cols, max_reviews=args.max_reviews)
 
     layer_sizes = build_layer_options(total_items)[params["layers"]](total_items)
@@ -189,40 +153,50 @@ def run_fold(args, model_name, params, loss_kwargs, df, split, df_text, text_col
     ).to(device)
     model.set_item_corpus(item_ids.to(device), item_text.to(device), item_mask.to(device))
 
-    train_loader = DataLoader(
-        RankingTrainDataset(train_matrix, text_train, train, seed=seed,
-                            max_user_reviews=args.max_reviews, mask_pos_in_input=True),
-        batch_size=args.batch_size, shuffle=True, collate_fn=train_collate_fn, num_workers=args.num_workers)
-    val_loader = DataLoader(
-        RankingTrainDataset(train_matrix, text_train, val, max_user_reviews=args.max_reviews,
-                            mask_pos_in_input=False),
-        batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-        collate_fn=lambda b: loocv_collate_fn(b, inter_train, total_items, fixed_negatives=val_negs))
+    train_dataset = RankingTrainDataset(train_matrix, text_train, train, seed=seed,
+                                        max_user_reviews=args.max_reviews, mask_pos_in_input=True)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=train_collate_fn, num_workers=args.num_workers)
+
+    # --- val: full catalog, train history as input and as exclusion ---
+    val_scorer = CatalogScorer(model, train_matrix, train_dataset.user_text, len(text_cols),
+                               protocol.items, args.eval_batch_size)
+    val_history = []
+
+    def validate(m):
+        metrics = protocol.accuracy(val_scorer, "val", args.eval_chunk)
+        val_history.append(metrics)
+        print(f"  val ndcg@10={metrics['ndcg@10']:.4f}  recall@10={metrics['recall@10']:.4f}  "
+              f"mrr={metrics['mrr']:.4f}")
+        return metrics[SELECTION]
 
     early_stopping = EarlyStoppingRanking(patience=args.patience, verbose=True)
     t0 = time.time()
-    best_val_hr, train_losses = train_model(model, args.epochs, train_loader, val_loader, early_stopping)
+    best_val, train_losses = train_model(model, args.epochs, train_loader, None, early_stopping,
+                                         validate=validate)
     early_stopping.load_best_into_model(model)
     train_time = time.time() - t0
 
-    # --- test: the user's train + val history is the input ---
+    # --- test: train + val history as input and as exclusion ---
     hist_matrix = create_sparse_matrix(history, total_users, total_items)
-    text_hist = text_seen(df_text, history)
-    inter_hist = build_interacted_by_user(history)
-    test_negs = build_fixed_negatives(test, inter_hist, total_items, seed=seed + 1000)
-    test_loader = DataLoader(
-        RankingTrainDataset(hist_matrix, text_hist, test, max_user_reviews=args.max_reviews,
-                            mask_pos_in_input=False),
-        batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-        collate_fn=lambda b: loocv_collate_fn(b, inter_hist, total_items, fixed_negatives=test_negs))
-    metrics, per_user = evaluate_ranking(model, test_loader)
+    hist_text = user_text_arrays(text_seen(df_text, history), text_cols, args.max_reviews)
+    test_scorer = CatalogScorer(model, hist_matrix, hist_text, len(text_cols),
+                                protocol.items, args.eval_batch_size)
+    metrics, rankings = protocol.report(test_scorer, "test", args.eval_chunk)
 
-    row = {"fold": fold, **metrics, "best_val_HR@10": float(best_val_hr),
+    rows = protocol.rows["test"]
+    per_user = pd.DataFrame({"userId": rows["user"].to_numpy(), "itemId": rows["item"].to_numpy(),
+                             "rating": rankings.ratings, "liked": rankings.liked,
+                             "rank": rankings.ranks})  # 0-based, ties at mean position
+
+    row = {"fold": fold, **metrics, f"best_val_{SELECTION}": float(best_val),
            "epochs_run": len(train_losses), "train_time_s": round(train_time, 1)}
-    losses = {"fold": fold, "best_val_HR@10": float(best_val_hr), "train_losses": json.dumps(
-        [float(x) for x in train_losses])}
+    losses = {"fold": fold, f"best_val_{SELECTION}": float(best_val),
+              "train_losses": json.dumps([float(x) for x in train_losses]),
+              "val_metrics": json.dumps(val_history)}
 
-    del model, early_stopping, train_loader, val_loader, test_loader, item_ids, item_text, item_mask
+    del model, early_stopping, train_loader, train_dataset, val_scorer, test_scorer
+    del item_ids, item_text, item_mask
     gc.collect()
     torch.cuda.empty_cache()
     return row, losses, per_user
@@ -232,7 +206,8 @@ def run_fold(args, model_name, params, loss_kwargs, df, split, df_text, text_col
 # Main
 # ---------------------------------------------------------------------------
 def summarize(df_folds):
-    metric_cols = [f"HR@{k}" for k in KS] + [f"NDCG@{k}" for k in KS] + ["MRR"]
+    metric_cols = [c for c in df_folds.columns
+                   if c not in INFO_COLS and pd.api.types.is_numeric_dtype(df_folds[c])]
     return pd.DataFrame({"metric": metric_cols,
                          "mean": [df_folds[c].mean() for c in metric_cols],
                          "std": [df_folds[c].std(ddof=1) if len(df_folds) > 1 else 0.0 for c in metric_cols],
@@ -246,7 +221,7 @@ def main():
     p.add_argument("--folds", nargs="+", type=int, default=FOLDS)
     p.add_argument("--splits_dir", default="splits")
     p.add_argument("--hparams_dir", default="grid_search/best_hyperparameters")
-    p.add_argument("--out_dir", default="results/new_ghcf")
+    p.add_argument("--out_dir", default="results/new_ghc2f")
     p.add_argument("--data_path", default=None, help="Default: same lookup as optimizer_hyper.py")
     p.add_argument("--embeddings_path", default=None,
                    help="Default: same lookup as optimizer_hyper.py. May use {dataset} and {fold}, e.g. "
@@ -254,11 +229,12 @@ def main():
     p.add_argument("--epochs", type=int, default=STAGE3_EPOCHS)
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--eval_batch_size", type=int, default=512, help="Users per model forward at evaluation")
+    p.add_argument("--eval_chunk", type=int, default=ITEM_CHUNK,
+                   help="Rows ranked per pass (each holds a rows x catalog score matrix on the GPU)")
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--max_reviews", type=int, default=MAX_REVIEWS)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--only_relevant_test", action="store_true",
-                   help="Keep only test items rated above the user's train mean (old run_experiment.py behaviour)")
     p.add_argument("--overwrite", action="store_true", help="Re-run folds that already have results")
     args = p.parse_args()
 
@@ -297,12 +273,16 @@ def main():
             folds_csv = os.path.join(out_dir, f"{model_name}_folds.csv")
             losses_csv = os.path.join(out_dir, f"{model_name}_losses.csv")
             prev = pd.read_csv(folds_csv) if os.path.exists(folds_csv) and not args.overwrite else None
+            if prev is not None and "ndcg@10" not in prev.columns:
+                raise SystemExit(f"{folds_csv} was made with the old sampled-negatives protocol; "
+                                 f"move it away or pass --overwrite")
             rows = prev.to_dict("records") if prev is not None else []
             loss_rows = (pd.read_csv(losses_csv).to_dict("records")
                          if prev is not None and os.path.exists(losses_csv) else [])
 
             with open(os.path.join(out_dir, f"{model_name}_config.json"), "w") as f:
                 json.dump({"dataset": dataset, "model": model_name, "data_path": data_path,
+                           "protocol": "irev_full_catalog", "selection": SELECTION,
                            "backbone": params, "loss_kwargs": loss_kwargs,
                            "args": vars(args)}, f, indent=2, default=str)
 
@@ -327,8 +307,8 @@ def main():
                 row.update(dataset=dataset, model=model_name, text_features=emb_path)
                 rows.append(row)
                 loss_rows.append(losses)
-                print("  TEST " + "  ".join(f"{k}={v:.4f}" for k, v in row.items()
-                                             if k.startswith(("HR@", "NDCG@", "MRR"))))
+                print("  TEST " + "  ".join(f"{k}={row[k]:.4f}" for k in
+                                             ("ndcg@10", "recall@10", "mrr", "coverage@10", "aplt@10")))
 
                 # saved after every fold, so a crash keeps the finished folds
                 df_folds = pd.DataFrame(rows).sort_values("fold")

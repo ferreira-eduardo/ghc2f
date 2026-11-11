@@ -1,21 +1,23 @@
 {
-  "dataset": "rotten_tomatoes",
+  "dataset": "amazon",
   "model": "ghc2f",
-  "data_path": "datasets/rotten_tomatoes.parquet",
+  "data_path": "data/amazon.parquet",
+  "protocol": "irev_full_catalog",
+  "selection": "ndcg@10",
   "backbone": {
-    "layers": "narrow_d1",
+    "layers": "wide_d2",
     "nl_type": "selu",
-    "dropout": 0.5798739760878884,
-    "lr": 0.0024693771539627,
+    "dropout": 0.0669181356300535,
+    "lr": 1.457935711324833e-05,
     "tied_weights": true
   },
   "loss_kwargs": {
     "contrastive_target": "text",
     "stop_grad_cf": true,
-    "cl_weight": 0.0014384703476268,
-    "reg_weight": 1.1548408157886672e-05,
+    "cl_weight": 0.0159407827019363,
+    "reg_weight": 0.0009073645070639,
     "gate_entropy_weight": 0.0,
-    "text_gamma": 0.4671751867877408
+    "text_gamma": 0.4530727617533713
   },
   "args": {
     "datasets": [
@@ -25,7 +27,8 @@
     ],
     "models": [
       "gated_hybrid",
-      "ghc2f"
+      "ghc2f",
+      "AE_BPR"
     ],
     "folds": [
       0,
@@ -36,16 +39,17 @@
     ],
     "splits_dir": "splits",
     "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "out_dir": "results/old_new_ghcf",
     "data_path": null,
-    "embeddings_path": "results/embeddings/",
-    "epochs": 40,
+    "embeddings_path": null,
+    "epochs": 30,
     "patience": 5,
     "batch_size": 256,
-    "eval_batch_size": 256,
+    "eval_batch_size": 512,
+    "eval_chunk": 8192,
     "num_workers": 0,
     "max_reviews": 50,
     "seed": 42,
-    "overwrite": true
+    "overwrite": false
   }
 }

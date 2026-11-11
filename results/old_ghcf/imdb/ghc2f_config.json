@@ -1,21 +1,23 @@
 {
-  "dataset": "amazon",
+  "dataset": "imdb",
   "model": "ghc2f",
-  "data_path": "datasets/amazon.parquet",
+  "data_path": "data/imdb.parquet",
+  "protocol": "irev_full_catalog",
+  "selection": "ndcg@10",
   "backbone": {
-    "layers": "narrow_d3",
-    "nl_type": "selu",
-    "dropout": 0.1011236117372092,
-    "lr": 4.888961905353264e-05,
+    "layers": "wide_d1",
+    "nl_type": "relu",
+    "dropout": 0.2917640656093283,
+    "lr": 0.0016184943376354,
     "tied_weights": true
   },
   "loss_kwargs": {
     "contrastive_target": "text",
     "stop_grad_cf": true,
-    "cl_weight": 0.0494633020940528,
-    "reg_weight": 1.0535344658237818e-06,
+    "cl_weight": 0.0044831782252117,
+    "reg_weight": 0.0001064981299074,
     "gate_entropy_weight": 0.0,
-    "text_gamma": 0.3906566037569667
+    "text_gamma": 0.8662253669183728
   },
   "args": {
     "datasets": [
@@ -25,7 +27,8 @@
     ],
     "models": [
       "gated_hybrid",
-      "ghc2f"
+      "ghc2f",
+      "AE_BPR"
     ],
     "folds": [
       0,
@@ -36,16 +39,17 @@
     ],
     "splits_dir": "splits",
     "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "out_dir": "results/old_new_ghcf",
     "data_path": null,
-    "embeddings_path": "results/embeddings/",
-    "epochs": 40,
+    "embeddings_path": null,
+    "epochs": 30,
     "patience": 5,
     "batch_size": 256,
-    "eval_batch_size": 256,
+    "eval_batch_size": 512,
+    "eval_chunk": 8192,
     "num_workers": 0,
     "max_reviews": 50,
     "seed": 42,
-    "overwrite": true
+    "overwrite": false
   }
 }

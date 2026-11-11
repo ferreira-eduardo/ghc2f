@@ -9,10 +9,13 @@ def train_model(
         val_loader,
         early_stopping,
         epoch_callback=None,
+        validate=None,
 ):
     """
-    epoch_callback(epoch, val_hit_rate) is called after each validation
+    epoch_callback(epoch, val_metric) is called after each validation
     (e.g. Optuna reporting/pruning; it may raise to stop the run).
+    validate(model) -> float replaces model.evaluate(val_loader)['hit_rate'] as the
+    early-stopping metric (higher is better), e.g. full-catalog val nDCG@10.
     """
     device = model.device if hasattr(model, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -48,12 +51,12 @@ def train_model(
         train_losses.append(avg_train_loss)
 
         # --- VALIDATION ---
-        val_metrics = model.evaluate(val_loader)
-        # val_rmse = val_metrics['rmse']
-        # val_mae = val_metrics['mae']
-        hit_rate = float(val_metrics['hit_rate'])
-
-        print(f" --> Val HIT RATE: {hit_rate}" )
+        if validate is not None:
+            hit_rate = float(validate(model))
+            print(f" --> Val metric: {hit_rate:.5f}")
+        else:
+            hit_rate = float(model.evaluate(val_loader)['hit_rate'])
+            print(f" --> Val HIT RATE: {hit_rate}")
 
         # --- EARLY STOPPING ---
         early_stopping(hit_rate, model)

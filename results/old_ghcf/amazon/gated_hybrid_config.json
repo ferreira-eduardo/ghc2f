@@ -1,13 +1,15 @@
 {
   "dataset": "amazon",
   "model": "gated_hybrid",
-  "data_path": "datasets/amazon.parquet",
+  "data_path": "data/amazon.parquet",
+  "protocol": "irev_full_catalog",
+  "selection": "ndcg@10",
   "backbone": {
     "layers": "mf_like_d1",
     "nl_type": "selu",
-    "dropout": 0.4234858037829629,
-    "lr": 0.0003295184037598,
-    "tied_weights": true
+    "dropout": 0.1309534246332621,
+    "lr": 8.01340439977617e-05,
+    "tied_weights": false
   },
   "loss_kwargs": {},
   "args": {
@@ -18,7 +20,8 @@
     ],
     "models": [
       "gated_hybrid",
-      "ghc2f"
+      "ghc2f",
+      "AE_BPR"
     ],
     "folds": [
       0,
@@ -29,16 +32,17 @@
     ],
     "splits_dir": "splits",
     "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "out_dir": "results/old_new_ghcf",
     "data_path": null,
-    "embeddings_path": "results/embeddings/",
-    "epochs": 40,
+    "embeddings_path": null,
+    "epochs": 30,
     "patience": 5,
     "batch_size": 256,
-    "eval_batch_size": 256,
+    "eval_batch_size": 512,
+    "eval_chunk": 8192,
     "num_workers": 0,
     "max_reviews": 50,
     "seed": 42,
-    "overwrite": true
+    "overwrite": false
   }
 }

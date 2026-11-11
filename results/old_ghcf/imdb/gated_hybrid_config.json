@@ -1,12 +1,14 @@
 {
   "dataset": "imdb",
   "model": "gated_hybrid",
-  "data_path": "datasets/imdb.parquet",
+  "data_path": "data/imdb.parquet",
+  "protocol": "irev_full_catalog",
+  "selection": "ndcg@10",
   "backbone": {
     "layers": "wide_d1",
     "nl_type": "relu",
-    "dropout": 0.4944153431830394,
-    "lr": 0.0019808856189303,
+    "dropout": 0.2448207282830051,
+    "lr": 0.0014723345431598,
     "tied_weights": true
   },
   "loss_kwargs": {},
@@ -18,7 +20,8 @@
     ],
     "models": [
       "gated_hybrid",
-      "ghc2f"
+      "ghc2f",
+      "AE_BPR"
     ],
     "folds": [
       0,
@@ -29,16 +32,17 @@
     ],
     "splits_dir": "splits",
     "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "out_dir": "results/old_new_ghcf",
     "data_path": null,
-    "embeddings_path": "results/embeddings/",
-    "epochs": 40,
+    "embeddings_path": null,
+    "epochs": 30,
     "patience": 5,
     "batch_size": 256,
-    "eval_batch_size": 256,
+    "eval_batch_size": 512,
+    "eval_chunk": 8192,
     "num_workers": 0,
     "max_reviews": 50,
     "seed": 42,
-    "overwrite": true
+    "overwrite": false
   }
 }
