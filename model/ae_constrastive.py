@@ -140,12 +140,6 @@ class AE_Contrastive(CFAutoEncoder):
                 nn.Linear(proj_dim, self.code_dim),
             )
 
-        # Optimizer-construction-order fix (same issue/pattern as the
-        # earlier GatedHybridCFAutoEncoder fix): CFAutoEncoder.__init__
-        # (via super().__init__() above) builds self.optimizer BEFORE any
-        # of this class's own modules exist, so they'd be silently
-        # excluded from optimization otherwise. Rebuilding here, now that
-        # everything above exists, fixes it.
         learn_rate = self.optimizer.param_groups[0]['lr']
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learn_rate)
 
