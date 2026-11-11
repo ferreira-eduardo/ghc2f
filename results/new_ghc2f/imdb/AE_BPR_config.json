@@ -1,0 +1,48 @@
+{
+  "dataset": "imdb",
+  "model": "AE_BPR",
+  "data_path": "data/imdb.parquet",
+  "protocol": "irev_full_catalog",
+  "selection": "ndcg@10",
+  "backbone": {
+    "layers": "wide_d1",
+    "nl_type": "relu",
+    "dropout": 0.2448207282830051,
+    "lr": 0.0014723345431598,
+    "tied_weights": true
+  },
+  "loss_kwargs": {},
+  "hparams_from": "gated_hybrid",
+  "args": {
+    "datasets": [
+      "imdb",
+      "rotten_tomatoes",
+      "amazon"
+    ],
+    "models": [
+      "AE_BPR"
+    ],
+    "folds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "splits_dir": "splits",
+    "hparams_dir": "grid_search/best_hyperparameters",
+    "textless_hparams_from": "gated_hybrid",
+    "out_dir": "results/new_ghc2f",
+    "data_path": null,
+    "embeddings_path": null,
+    "epochs": 30,
+    "patience": 5,
+    "batch_size": 256,
+    "eval_batch_size": 512,
+    "eval_chunk": 8192,
+    "num_workers": 0,
+    "max_reviews": 50,
+    "seed": 42,
+    "overwrite": false
+  }
+}
