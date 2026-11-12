@@ -230,7 +230,7 @@ def main():
     p.add_argument("--models", nargs="+", default=MODELS, choices=sorted(MODEL_CLASSES))
     p.add_argument("--folds", nargs="+", type=int, default=FOLDS)
     p.add_argument("--splits_dir", default="splits")
-    p.add_argument("--hparams_dir", default="grid_search/old_best_hyperparameters")
+    p.add_argument("--hparams_dir", default="grid_search/best_hyperparameters")
     p.add_argument("--textless_hparams_from", default="gated_hybrid", choices=HPARAM_SOURCES,
                    help="Which tuned text model's backbone (layers/nl_type/dropout/lr/tied_weights) "
                         "the text-free models (AE_BPR) reuse")

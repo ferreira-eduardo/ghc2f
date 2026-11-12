@@ -29,6 +29,7 @@ def train_model(
         batch_losses = []
 
         # --- TRAIN LOOP ---
+
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
         for batch in pbar:
             batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
