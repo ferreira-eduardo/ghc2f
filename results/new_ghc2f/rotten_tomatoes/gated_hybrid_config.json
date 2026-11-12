@@ -5,34 +5,32 @@
   "protocol": "irev_full_catalog",
   "selection": "ndcg@10",
   "backbone": {
-    "layers": "mf_like_d2",
+    "layers": "mid_d3",
     "nl_type": "relu",
-    "dropout": 0.5998157700347962,
-    "lr": 0.0001666000816595,
+    "dropout": 0.0056104906529115,
+    "lr": 0.0004852742950998,
     "tied_weights": false
   },
   "loss_kwargs": {},
+  "overrides": {},
+  "hparams_from": "gated_hybrid",
   "args": {
     "datasets": [
-      "imdb",
-      "rotten_tomatoes",
-      "amazon"
+      "rotten_tomatoes"
     ],
     "models": [
-      "gated_hybrid",
       "ghc2f",
-      "AE_BPR"
+      "gated_hybrid"
     ],
     "folds": [
-      0,
-      1,
-      2,
       3,
       4
     ],
     "splits_dir": "splits",
-    "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "hparams_dir": "grid_search/best_hyperparameters/topics_rt",
+    "textless_hparams_from": "gated_hybrid",
+    "set": [],
+    "out_dir": "results/new_ghc2f",
     "data_path": null,
     "embeddings_path": null,
     "epochs": 30,

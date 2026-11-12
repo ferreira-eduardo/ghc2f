@@ -9,15 +9,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
-DATASETS="${*:-amazon imdb}"            # one or more dataset names
+DATASETS="${*:-imdb rotten_tomatoes}"            # one or more dataset names
 MODELS="${MODELS:-gated_hybrid ghc2f}"   # cf_autoencoder ignores text, so topics don't change it
 FOLDS="0"
 
 STORAGE="sqlite:///optuna.db"
 
 # Flat folder with {dataset}_{model}.csv, the layout run_experiment.py --hparams_dir reads.
-# Separate from the old HR@10 results in grid_search/best_hyperparameters/topics/{dataset}/fold0/.
-HPARAMS_DIR="grid_search/best_hyperparameters/topics_irev"
+# Separate from the old HR@10 results in grid_search/old_best_hyperparameters/topics/{dataset}/fold0/.
+HPARAMS_DIR="grid_search/best_hyperparameters"
 
 # One parameter file per dataset/model, shared by all 5 final folds -> tune on a single fold.
 if [[ $(wc -w <<< "$FOLDS") -ne 1 ]]; then
@@ -25,11 +25,18 @@ if [[ $(wc -w <<< "$FOLDS") -ne 1 ]]; then
   exit 1
 fi
 
-STAGE1_TRIALS=30
-STAGE2_TRIALS=30
-EPOCHS=30          # per Stage 1/2 trial
-STAGE3_EPOCHS=30
+STAGE1_TRIALS=40
+STAGE2_TRIALS=40
+EPOCHS=50          # per Stage 1/2 trial
+STAGE3_EPOCHS=40
 BATCH_SIZE=256
+PATIENCE=5
+
+# Delete and re-run existing studies (needed after changing epochs/fractions, which
+# otherwise raise a mismatch error). Set RESTART=0 to resume an interrupted run instead.
+RESTART="${RESTART:-1}"
+RESTART_FLAG=""
+[[ "$RESTART" == "1" ]] && RESTART_FLAG="--restart"
 
 # Check every input before starting, so a missing fold doesn't fail hours in.
 for DATASET in $DATASETS; do
@@ -43,6 +50,20 @@ done
 for DATASET in $DATASETS; do
   TOPICS_DIR="results/topics/${DATASET}"
   LOG_DIR="logs/topics/${DATASET}"
+
+  # Per-dataset settings. Rotten Tomatoes has ~1.5k evaluated users and val nDCG@10
+  # around 0.005, so sampling users makes trial-to-trial differences mostly noise:
+  # use every user in Stages 1/2, more patience, and more updates per epoch.
+  STAGE1_FRAC=0.5
+  STAGE2_FRAC=""            # empty -> optimizer default (0.6; 0.7 for rotten_tomatoes)
+  DS_PATIENCE=$PATIENCE
+  DS_BATCH_SIZE=$BATCH_SIZE
+  if [[ "$DATASET" == "rotten_tomatoes" ]]; then
+    STAGE1_FRAC=1.0
+    STAGE2_FRAC=1.0
+    DS_PATIENCE=10
+    DS_BATCH_SIZE=64
+  fi
   mkdir -p "$LOG_DIR"
 
   for fold in $FOLDS; do
@@ -53,7 +74,7 @@ for DATASET in $DATASETS; do
 
       echo "=== ${DATASET} | ${model} | fold ${fold} | topics -> ${out_dir} ==="
       # "_topics" in the study name keeps these studies apart from the
-      # review-embedding studies already in optuna.db.
+      # review-embedding studies already in old_optuna.db.
       uv run python grid_search/optimizer_hyper.py "$DATASET" \
         --model "$model" \
         --fold "$fold" \
@@ -63,7 +84,11 @@ for DATASET in $DATASETS; do
         --stage2_trials "$STAGE2_TRIALS" \
         --epochs "$EPOCHS" \
         --stage3_epochs "$STAGE3_EPOCHS" \
-        --batch_size "$BATCH_SIZE" \
+        --batch_size "$DS_BATCH_SIZE" \
+        --patience "$DS_PATIENCE" \
+        --stage1_frac "$STAGE1_FRAC" \
+        ${STAGE2_FRAC:+--stage2_frac "$STAGE2_FRAC"} \
+        $RESTART_FLAG \
         --storage "$STORAGE" \
         --study_prefix "${DATASET}_${model}_topics_fold${fold}" \
         --out_dir "$out_dir" \
@@ -76,3 +101,4 @@ echo "Done. Best hyperparameters: ${HPARAMS_DIR}/{dataset}_{model}.csv"
 echo "Final runs:"
 echo "  uv run python run_experiment.py --datasets ${DATASETS} --hparams_dir ${HPARAMS_DIR} \\"
 echo "    --embeddings_path 'results/topics/{dataset}/fold{fold}/review_topic_dist.npy'"
+echo "  (rotten_tomatoes was tuned with --batch_size 64 --patience 10; pass the same to run_experiment.py)"

@@ -6,40 +6,38 @@
   "selection": "ndcg@10",
   "backbone": {
     "layers": "wide_d1",
-    "nl_type": "selu",
-    "dropout": 0.4453098798354419,
-    "lr": 0.0065033307359045,
+    "nl_type": "relu",
+    "dropout": 0.5270182486238046,
+    "lr": 0.0006831981124666,
     "tied_weights": true
   },
   "loss_kwargs": {
     "contrastive_target": "collaborative",
-    "stop_grad_cf": false,
-    "cl_weight": 0.4224838280406293,
-    "reg_weight": 1.935939862109868e-05,
+    "stop_grad_cf": true,
+    "cl_weight": 0.7025166339242155,
+    "reg_weight": 0.000788671412999,
     "gate_entropy_weight": 0.0,
-    "text_gamma": 0.7009322596103055
+    "text_gamma": 0.573931655089634
   },
+  "overrides": {},
+  "hparams_from": "ghc2f",
   "args": {
     "datasets": [
-      "imdb",
-      "rotten_tomatoes",
-      "amazon"
+      "rotten_tomatoes"
     ],
     "models": [
-      "gated_hybrid",
       "ghc2f",
-      "AE_BPR"
+      "gated_hybrid"
     ],
     "folds": [
-      0,
-      1,
-      2,
       3,
       4
     ],
     "splits_dir": "splits",
-    "hparams_dir": "grid_search/best_hyperparameters",
-    "out_dir": "results/new_ghcf",
+    "hparams_dir": "grid_search/best_hyperparameters/topics_rt",
+    "textless_hparams_from": "gated_hybrid",
+    "set": [],
+    "out_dir": "results/new_ghc2f",
     "data_path": null,
     "embeddings_path": null,
     "epochs": 30,

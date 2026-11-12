@@ -41,28 +41,24 @@ _WIDTH_FRACS = {
     "mid": 0.20,
     "wide": 0.40,
 }
-_MIN_WIDTH, _MAX_WIDTH = 32, 4096
-
+_MIN_WIDTH = 32
 
 def _width(n: int, frac: float) -> int:
-    return int(np.clip(round(n * frac), _MIN_WIDTH, _MAX_WIDTH))
-
+    return max(int(round(n * frac)), _MIN_WIDTH)
 
 def build_layer_options(n: int) -> dict:
-    """Cartesian grid over {width tier} x {depth}, all widths relative to n
-    and monotonically non-increasing within a config. Every config is a
-    genuine bottleneck (first hidden width <= n), so the same tier name
-    (e.g. 'mid') means a comparable compression ratio across datasets of
-    very different item counts.
-    """
-    options = {}
+    """{width tier} x {depth}, widths relative to n. Configs that collapse to the
+    same layer sizes after clipping are kept once (first tier name wins)."""
+    options, seen = {}, set()
     for tier, frac in _WIDTH_FRACS.items():
+
         w = _width(n, frac)
-        options[f"{tier}_d1"] = lambda n_, w=w: [n_, w]
-        options[f"{tier}_d2"] = lambda n_, w=w: [n_, w, max(w // 2, _MIN_WIDTH)]
-        options[f"{tier}_d3"] = lambda n_, w=w: [
-            n_, w, max(w // 2, _MIN_WIDTH), max(w // 4, _MIN_WIDTH)
-        ]
+        for d in (1, 2, 3):
+            sizes = [max(w // 2 ** i, _MIN_WIDTH) for i in range(d)]
+            if tuple(sizes) in seen:
+                continue
+            seen.add(tuple(sizes))
+            options[f"{tier}_d{d}"] = lambda n_, s=tuple(sizes): [n_, *s]
     return options
 
 
@@ -86,8 +82,8 @@ MAX_REVIEWS = 50    # per-user / per-item review cap for the text profilers
 # catalog, train history excluded, per-user positive threshold, graded nDCG@10 as the
 # objective. Stored in each study and appended to the study names so trials scored with
 # the old 99-sampled-negatives HR@10 are never mixed in.
-PROTOCOL_TAG = f"irev_full_catalog_{SELECTION}"
-STUDY_SUFFIX = "irev"
+PROTOCOL_TAG = f"full_catalog_{SELECTION}"
+STUDY_SUFFIX = "new_opt"
 VAL_COL = f"full_data_val_{SELECTION}"
 
 
@@ -120,13 +116,14 @@ def resolve_embeddings_path(dataset_name, embeddings_path=None):
 class GatedAEOptimizer:
     def __init__(self, dataset_name, device, data_path, embeddings_path, split_path=None, fold=0,
                  sample_frac=STAGE1_SAMPLE_FRAC, random_state=42, batch_size=256, num_workers=0,
-                 max_reviews=MAX_REVIEWS, eval_batch_size=512, eval_chunk=ITEM_CHUNK):
+                 max_reviews=MAX_REVIEWS, eval_batch_size=512, eval_chunk=ITEM_CHUNK, patience=5):
         self.dataset_name = dataset_name
         self.device = device
         self.random_state = random_state
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.max_reviews = max_reviews
+        self.patience = patience
         self.eval_batch_size = eval_batch_size
         self.eval_chunk = eval_chunk
 
@@ -282,7 +279,7 @@ class GatedAEOptimizer:
     def _run_and_cleanup(self, model, train_loader, num_epochs=STAGE1_EPOCHS, trial=None):
         """Trains the model. With `trial`, reports the running best val nDCG@10
         after every epoch so the pruner can stop bad trials early."""
-        early_stopping = EarlyStoppingRanking(patience=5, verbose=False)
+        early_stopping = EarlyStoppingRanking(patience=self.patience, verbose=False)
         validate = self._validator(model)
         callback = None
 
@@ -398,7 +395,7 @@ class GatedAEOptimizer:
 
 
 def make_storage(url):
-    """None -> in-memory. For an RDB URL (e.g. sqlite:///optuna.db), a
+    """None -> in-memory. For an RDB URL (e.g. sqlite:///old_optuna.db), a
     heartbeat marks trials of a crashed/killed run as FAIL, so a resumed run
     doesn't count them as finished."""
     if url is None:
@@ -494,13 +491,15 @@ if __name__ == "__main__":
     parser.add_argument("--stage2_epochs", type=int, default=None,
                         help="Epochs per Stage 2 trial. Default: --epochs")
     parser.add_argument("--stage3_epochs", type=int, default=STAGE3_EPOCHS)
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Early-stopping patience (epochs without val nDCG@10 gain) in every stage")
     parser.add_argument("--skip_stage3", action="store_true", help="Skip the full-data confirmation stage")
-    parser.add_argument("--out_dir", type=str, default="grid_search/best_hyperparameters")
+    parser.add_argument("--out_dir", type=str, default="grid_search/old_best_hyperparameters")
     parser.add_argument("--batch_size", type=int, default=256,
                         help="Users per batch. Keep it well below the number of evaluated users "
                              "(~3k on rotten_tomatoes) or each epoch is only 1-2 optimizer steps.")
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--storage", type=str, default="sqlite:///optuna.db",
+    parser.add_argument("--storage", type=str, default="sqlite:///old_optuna.db",
                         help="Optuna storage URL; studies are resumed from it. Pass 'none' for in-memory.")
     parser.add_argument("--study_prefix", type=str, default=None,
                         help="Default: {dataset}_{model}_fold{fold}")
@@ -530,7 +529,7 @@ if __name__ == "__main__":
         embeddings_path=resolve_embeddings_path(args.dataset, args.embeddings_path),
         split_path=split_path, fold=args.fold, sample_frac=args.stage1_frac,
         batch_size=args.batch_size, num_workers=args.num_workers, max_reviews=args.max_reviews,
-        eval_batch_size=args.eval_batch_size, eval_chunk=args.eval_chunk,
+        eval_batch_size=args.eval_batch_size, eval_chunk=args.eval_chunk, patience=args.patience,
     )
 
     # --- Stage 1: backbone search ---

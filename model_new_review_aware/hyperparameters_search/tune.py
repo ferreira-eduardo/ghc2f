@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--base-study", default=None,
                         help="estudo anterior cujos melhores parâmetros ficam fixos")
-    parser.add_argument("--storage", default="sqlite:///optuna.db")
+    parser.add_argument("--storage", default="sqlite:///old_optuna.db")
     parser.add_argument("--root", default="data/all_beauty")
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()

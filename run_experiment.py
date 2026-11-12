@@ -2,7 +2,7 @@
 
 For every dataset / model / fold:
   * split      : splits/{dataset}_fold{k}.csv            (utils/leave_one_out_cv.py)
-  * params     : grid_search/best_hyperparameters/{dataset}_{model}.csv
+  * params     : grid_search/old_best_hyperparameters/{dataset}_{model}.csv
   * protocol   : utils/irev_protocol.py (same code as the iRev baselines)
       - positive = rating >= per-user threshold (train mean shrunk to the global mean,
         clipped to [0.6, 0.8] x max rating), computed on train only
@@ -44,8 +44,8 @@ from utils.irev_protocol import ITEM_CHUNK, SELECTION, Protocol
 from utils.train_model import train_model
 from utils.utils import prepare_inputs, EarlyStoppingRanking
 
-DATASETS = ["amazon"]
-MODELS = ["ghc2f"]
+DATASETS = ["rotten_tomatoes"]
+MODELS = ["ghc2f", "gated_hybrid"]
 # Text-free AE_BPR has no tuned CSV of its own: it reuses the backbone of a text model
 # (only BACKBONE_KEYS are read; the text/loss hyperparameters are ignored).
 TEXTLESS_MODELS = {"AE_BPR": CFAutoEncoder}
@@ -230,7 +230,7 @@ def main():
     p.add_argument("--models", nargs="+", default=MODELS, choices=sorted(MODEL_CLASSES))
     p.add_argument("--folds", nargs="+", type=int, default=FOLDS)
     p.add_argument("--splits_dir", default="splits")
-    p.add_argument("--hparams_dir", default="grid_search/best_hyperparameters")
+    p.add_argument("--hparams_dir", default="grid_search/old_best_hyperparameters")
     p.add_argument("--textless_hparams_from", default="gated_hybrid", choices=HPARAM_SOURCES,
                    help="Which tuned text model's backbone (layers/nl_type/dropout/lr/tied_weights) "
                         "the text-free models (AE_BPR) reuse")
@@ -349,8 +349,8 @@ def main():
                 df_folds = pd.DataFrame(rows).sort_values("fold")
                 df_folds.to_csv(folds_csv, index=False)
                 pd.DataFrame(loss_rows).to_csv(losses_csv, index=False)
-                per_user.to_csv(os.path.join(out_dir, f"{model_name}_fold{fold}_ranks.csv"), index=False)
-                summarize(df_folds).to_csv(os.path.join(out_dir, f"{model_name}_summary.csv"), index=False)
+                per_user.to_csv(os.path.join(out_dir, f"{model_name}_fold{fold}_ranks_rt.csv"), index=False)
+                summarize(df_folds).to_csv(os.path.join(out_dir, f"{model_name}_summary_rt.csv"), index=False)
 
                 if per_fold_text:
                     del df_text
