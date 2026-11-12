@@ -1,0 +1,2 @@
+dropout,lr,nl_type,layers,tied_weights,dataset,model,fold,split_file,stage1_sample_frac,protocol,full_data_val_ndcg@10
+0.5935647436974882,0.0020982405765690854,relu,wide_d1,True,imdb,gated_hybrid,0,splits/imdb_fold0.csv,0.5,full_catalog_ndcg@10,0.04529178097825209

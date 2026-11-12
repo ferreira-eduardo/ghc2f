@@ -1,0 +1,2 @@
+dropout,lr,nl_type,layers,tied_weights,dataset,model,fold,split_file,stage1_sample_frac,protocol,text_gamma,contrastive_target,stop_grad_cf,cl_weight,reg_weight,stage2_sample_frac,full_data_val_ndcg@10
+0.46151160735185903,0.0017483106760005137,relu,wide_d1,True,imdb,ghc2f,0,splits/imdb_fold0.csv,0.5,full_catalog_ndcg@10,0.41185346389659994,text,True,0.23471533487623156,1.1712109600669852e-05,0.6,0.043551600959536585

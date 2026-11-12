@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
-DATASETS="${*:-imdb rotten_tomatoes}"            # one or more dataset names
+DATASETS="${*:-amazon}"            # one or more dataset names
 MODELS="${MODELS:-gated_hybrid ghc2f}"   # cf_autoencoder ignores text, so topics don't change it
 FOLDS="0"
 
@@ -27,7 +27,7 @@ fi
 
 STAGE1_TRIALS=40
 STAGE2_TRIALS=40
-EPOCHS=50          # per Stage 1/2 trial
+EPOCHS=50
 STAGE3_EPOCHS=40
 BATCH_SIZE=256
 PATIENCE=5

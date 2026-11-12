@@ -1,0 +1,2 @@
+dropout,lr,nl_type,layers,tied_weights,dataset,model,fold,split_file,stage1_sample_frac,protocol,full_data_val_ndcg@10
+0.5998157700347962,0.0001666000816595018,relu,mf_like_d2,False,rotten_tomatoes,gated_hybrid,0,splits/rotten_tomatoes_fold0.csv,0.5,irev_full_catalog_ndcg@10,0.00557570731911456
