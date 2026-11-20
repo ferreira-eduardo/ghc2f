@@ -44,14 +44,14 @@ from utils.irev_protocol import ITEM_CHUNK, SELECTION, Protocol
 from utils.train_model import train_model
 from utils.utils import prepare_inputs, EarlyStoppingRanking
 
-DATASETS = ["rotten_tomatoes"]
+DATASETS = ["rotten_tomatoes", "imdb", "amazon"]
 MODELS = ["ghc2f", "gated_hybrid"]
 # Text-free AE_BPR has no tuned CSV of its own: it reuses the backbone of a text model
 # (only BACKBONE_KEYS are read; the text/loss hyperparameters are ignored).
 TEXTLESS_MODELS = {"AE_BPR": CFAutoEncoder}
 HPARAM_SOURCES = ("gated_hybrid", "ghc2f")
 MODEL_CLASSES = {**MODEL_REGISTRY, **TEXTLESS_MODELS}
-FOLDS = [3, 4]
+FOLDS = [0, 1, 2, 3, 4]
 GHC2F_LOSS_KEYS = ("text_gamma", "contrastive_target", "stop_grad_cf", "cl_weight", "reg_weight")
 BACKBONE_KEYS = ("layers", "nl_type", "dropout", "lr", "tied_weights")
 INFO_COLS = ("fold", "dataset", "model", "text_features", "epochs_run", "train_time_s")
@@ -343,7 +343,7 @@ def main():
                 rows.append(row)
                 loss_rows.append(losses)
                 print("  TEST " + "  ".join(f"{k}={row[k]:.4f}" for k in
-                                             ("ndcg@10", "recall@10", "mrr", "coverage@10", "aplt@10")))
+                                            ("ndcg@10", "recall@10", "mrr", "coverage@10", "aplt@10")))
 
                 # saved after every fold, so a crash keeps the finished folds
                 df_folds = pd.DataFrame(rows).sort_values("fold")
